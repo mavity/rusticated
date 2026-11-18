@@ -271,7 +271,15 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
 
     var cmd_buf: [8192]u8 = undefined;
     var cmd_len: usize = 0;
-    appendCmdArg(&cmd_buf, &cmd_len, prog);
+    const resolved_prog: []const u8 = if (std.mem.eql(u8, prog, "cmd.exe"))
+        "C:\\Windows\\System32\\cmd.exe"
+    else
+        prog;
+    if (std.mem.eql(u8, prog, "cmd.exe")) {
+        appendCmdArg(&cmd_buf, &cmd_len, "C:\\Windows\\System32\\cmd.exe");
+    } else {
+        appendCmdArg(&cmd_buf, &cmd_len, prog);
+    }
     while (nextNullStr(cfg, &pos)) |arg| {
         if (arg.len == 0) break;
         appendCmdArg(&cmd_buf, &cmd_len, arg);
@@ -306,6 +314,11 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
         return;
     };
     defer if (s.host.free) |free| free(@ptrCast(@constCast(wcmd)));
+    const wprog = mem.utf8ToWideAlloc(s, resolved_prog.ptr, resolved_prog.len) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    defer if (s.host.free) |free| free(@ptrCast(@constCast(wprog)));
 
     var wcwd: ?[*:0]u16 = null;
     if (cwd_slice.len > 0) {
@@ -315,7 +328,7 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
         if (s.host.free) |free| free(@ptrCast(@constCast(w)));
     };
 
-    var sa: win.SecurityAttributes = .{ .inherit_handle = 1 };
+    var pipe_sa: win.SecurityAttributes = .{ .inherit_handle = 1 };
     const input_pipe: ?ChildPipe = null;
     const output_pipe: ?ChildPipe = null;
     const error_pipe: ?ChildPipe = null;
@@ -324,6 +337,9 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
     var child_out: win.HANDLE = null;
     var child_err: win.HANDLE = null;
     var dup_to_close: [3]win.HANDLE = .{ null, null, null };
+    var pty_read_handle: win.HANDLE = null;
+    var pty_write_handle: win.HANDLE = null;
+    var pty_enabled = false;
 
     if (has_stdio) {
         const p_dup = mem.resolveKernel32(s, "DuplicateHandle");
@@ -336,10 +352,29 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
         for (0..3) |idx| {
             const spec = stdio_specs[idx];
             var src: win.HANDLE = defaults[idx];
+            if (std.mem.startsWith(u8, spec, "pty:")) {
+                pty_enabled = true;
+                if (mem.resolveKernel32(s, "CreatePipe")) |p_create_pipe| {
+                    const CreatePipeFn = *const fn (*win.HANDLE, *win.HANDLE, *win.SecurityAttributes, u32) callconv(win.win_cc) i32;
+                    const create_pipe: CreatePipeFn = @ptrCast(@alignCast(p_create_pipe));
+                    var in_r: win.HANDLE = null;
+                    var in_w: win.HANDLE = null;
+                    var out_r: win.HANDLE = null;
+                    var out_w: win.HANDLE = null;
+                    if (create_pipe(&in_r, &in_w, &pipe_sa, 4096) != 0 and create_pipe(&out_r, &out_w, &pipe_sa, 4096) != 0) {
+                        pty_read_handle = out_r;
+                        pty_write_handle = in_w;
+                        child_in = in_r;
+                        child_out = out_w;
+                        child_err = out_w;
+                        continue;
+                    }
+                }
+            }
             if (std.mem.eql(u8, spec, "null")) {
                 if (s.p_create_file_w) |cf| {
                     const access: u32 = if (idx == 0) 0x8000_0000 else 0x4000_0000;
-                    const nh = cf(&nul_w, access, 3, &sa, 3, 0x80, null);
+                    const nh = cf(&nul_w, access, 3, &pipe_sa, 3, 0x80, null);
                     if (nh != null and nh != win.INVALID_HANDLE_VALUE) {
                         child_slots[idx].* = nh;
                         dup_to_close[idx] = nh;
@@ -384,11 +419,46 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
     var pi: win.ProcessInformation = .{};
 
     // CREATE_NO_WINDOW = 0x08000000
-    const ok = create_proc(null, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
+    var ok = create_proc(wprog, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
+    if (ok == 0) {
+        @memset(std.mem.asBytes(&pi), 0);
+        ok = create_proc(null, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
+    }
+    if (ok == 0) {
+        @memset(std.mem.asBytes(&pi), 0);
+        const bare_cmd = mem.utf8ToWideAlloc(s, "cmd.exe", "cmd.exe".len) orelse null;
+        defer if (bare_cmd) |b| {
+            if (s.host.free) |free| free(@ptrCast(@constCast(b)));
+        };
+        if (bare_cmd) |b| {
+            ok = create_proc(b, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
+        }
+    }
+    if (ok == 0) {
+        var bare_buf: [8192]u8 = undefined;
+        var bare_len: usize = 0;
+        appendCmdArg(&bare_buf, &bare_len, "cmd.exe");
+        var bare_pos: usize = 0;
+        _ = nextNullStr(cfg, &bare_pos);
+        while (nextNullStr(cfg, &bare_pos)) |arg| {
+            if (arg.len == 0) break;
+            appendCmdArg(&bare_buf, &bare_len, arg);
+        }
+        if (mem.utf8ToWideAlloc(s, &bare_buf, bare_len)) |wb| {
+            defer if (s.host.free) |free| free(@ptrCast(@constCast(wb)));
+            @memset(std.mem.asBytes(&pi), 0);
+            ok = create_proc(null, wb, null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
+        }
+    }
     if (s.p_close_handle) |ch| {
         if (has_stdio) {
             for (dup_to_close) |dh| {
                 if (dh != null) _ = ch(dh);
+            }
+            if (pty_enabled) {
+                if (child_in != null) _ = ch(child_in);
+                if (child_out != null) _ = ch(child_out);
+                if (child_err != null and child_err != child_out) _ = ch(child_err);
             }
         }
     }
@@ -402,7 +472,8 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
             mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
             return;
         };
-        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        const raw = gle();
+        mem.completeInline(ov, win.mapWinError(raw), raw, 0);
         return;
     }
     if (s.p_close_handle) |ch| _ = ch(pi.thread);
@@ -423,7 +494,19 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
     const pso: *pal_abi.ProcessSpawnOverlapped = @ptrCast(@alignCast(ov));
     pso.child_handle = proc_he.token;
     pso.pty_handle = 0;
-    if (!has_stdio) {
+    if (pty_enabled) {
+        const pty_he = mem.allocHandle(s) orelse {
+            mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        pty_he.is_pty = true;
+        pty_he.pty_read = pty_read_handle;
+        pty_he.pty_write = pty_write_handle;
+        pso.pty_handle = pty_he.token;
+        pso.in_handle = 0;
+        pso.out_handle = pty_he.token;
+        pso.err_handle = 0;
+    } else if (!has_stdio) {
         pso.in_handle = 0;
         pso.out_handle = 0;
         pso.err_handle = 0;

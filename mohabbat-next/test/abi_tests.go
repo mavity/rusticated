@@ -179,7 +179,7 @@ var nativeAbiExpectedPasses = map[string][]string{
 	"abi_proc_env_no_host_leak":   {"abi_proc/env_no_host_setting_leak"},
 	"abi_proc_cwd":                {"abi_proc/cwd_exact_and_small"},
 	"abi_proc_cwd_invalid":        {"abi_proc/cwd_invalid"},
-	"abi_proc_spawn_wait":         {"abi_proc/spawn_wait"},
+	"abi_proc_spawn_wait":         {"abi_proc/spawn", "abi_proc/spawn_wait"},
 	"abi_proc_signal_invalid":     {"abi_proc/signal_invalid_handle"},
 	"abi_proc_wait_invalid":       {"abi_proc/wait_invalid_handle"},
 	"abi_proc_invalid_exe":        {"abi_proc/invalid_executable"},

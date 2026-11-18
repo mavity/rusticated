@@ -321,6 +321,41 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     };
+    if (he.is_pty) {
+        if (len == 0) {
+            mem.completeInline(ov, 0, 0, 0);
+            return;
+        }
+        if (mem.resolveKernel32(s, "PeekNamedPipe")) |p_peek| {
+            const PeekFn = *const fn (win.HANDLE, ?[*]u8, u32, ?*u32, ?*u32, ?*u32) callconv(win.win_cc) i32;
+            const peek: PeekFn = @ptrCast(@alignCast(p_peek));
+            var available: u32 = 0;
+            if (peek(he.pty_read, null, 0, null, &available, null) == 0) {
+                mem.completeInline(ov, 0, 0, 0);
+                return;
+            }
+            if (available == 0) {
+                mem.completeInline(ov, 0, 0, 0);
+                return;
+            }
+        }
+        const rf = s.p_read_file orelse {
+            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+            return;
+        };
+        var transferred: u32 = 0;
+        if (rf(he.pty_read, buf, @intCast(@min(len, 0x7fff_ffff)), &transferred, null) == 0) {
+            const err = if (s.p_get_last_error) |gle| gle() else 5;
+            if (err == 109 or err == 232) {
+                mem.completeInline(ov, 0, 0, 0);
+            } else {
+                mem.completeInline(ov, win.mapWinError(err), 0, 0);
+            }
+        } else {
+            mem.completeInline(ov, 0, 0, transferred);
+        }
+        return;
+    }
     if (!he.is_socket and he.access_mode == 1) {
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
@@ -404,6 +439,28 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
 
 fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) callconv(win.win_cc) void {
     const s = statePtr();
+    if (handle >= 3) {
+        if (mem.findHandle(s, handle)) |he| {
+            if (he.is_pty) {
+                if (len == 0) {
+                    mem.completeInline(ov, 0, 0, 0);
+                    return;
+                }
+                const wf = s.p_write_file orelse {
+                    mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+                    return;
+                };
+                var transferred: u32 = 0;
+                if (wf(he.pty_write, buf, @intCast(@min(len, 0x7fff_ffff)), &transferred, null) == 0) {
+                    const err = if (s.p_get_last_error) |gle| gle() else 5;
+                    mem.completeInline(ov, win.mapWinError(err), 0, 0);
+                } else {
+                    mem.completeInline(ov, 0, 0, transferred);
+                }
+                return;
+            }
+        }
+    }
     if (handle == 1 or handle == 2) {
         if (len == 0) {
             mem.completeInline(ov, 0, 0, 0);
@@ -542,7 +599,13 @@ fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(w
 fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
     const s = statePtr();
     const he = mem.findHandle(s, handle) orelse return;
-    if (he.is_dir) {
+    if (he.is_pty) {
+        if (s.p_close_handle) |ch| {
+            if (he.pty_read != null) _ = ch(he.pty_read);
+            if (he.pty_write != null) _ = ch(he.pty_write);
+        }
+        he.* = .{};
+    } else if (he.is_dir) {
         if (he.dir_find != win.INVALID_HANDLE_VALUE) {
             if (mem.resolveKernel32(s, "FindClose")) |p_fc| {
                 const FindCloseFn = *const fn (win.HANDLE) callconv(win.win_cc) i32;
