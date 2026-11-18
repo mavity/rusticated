@@ -413,7 +413,7 @@ env_fn!(fn env_fd_isatty(handle: u32) -> u32 {
 
 env_fn!(fn env_system_info_wait(ov_ptr: u32) {
     if let Some(ov) = guest_ov(ov_ptr) {
-        fail_ov(ov, 52);
+        (abi().system_info_wait)(ov);
     }
 });
 

@@ -295,8 +295,8 @@ mod tests {
         assert_eq!(offset_of!(ProcessSpawnOverlapped, out_handle), 48);
         assert_eq!(offset_of!(ProcessSpawnOverlapped, err_handle), 56);
 
-        // 2 boot fields + 45 function pointers = 47 * 8 = 376 bytes
-        assert_eq!(size_of::<PalAbiTable>(), 47 * 8);
+        // 2 boot fields + 46 function pointers = 48 * 8 = 384 bytes
+        assert_eq!(size_of::<PalAbiTable>(), 48 * 8);
         assert!(size_of::<RuntimeGlobals>() <= 0x10000);
     }
 

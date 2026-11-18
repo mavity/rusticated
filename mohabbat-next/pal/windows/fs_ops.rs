@@ -3,7 +3,7 @@
 use core::ffi::c_void;
 
 use crate::pal_abi::{
-    AbiDirEntryHeader, AbiStat, Overlapped, ERROR_BADF, ERROR_INVALID, ERROR_IO, ERROR_NOMEM,
+    AbiStat, Overlapped, ERROR_BADF, ERROR_INVALID, ERROR_IO, ERROR_NOENT, ERROR_NOMEM,
     PATH_REMOVE_FLAG_DIR, PATH_STAT_FLAG_NOFOLLOW, STAT_KIND_DIR, STAT_KIND_FILE,
     STAT_KIND_SYMLINK,
 };
@@ -191,6 +191,35 @@ unsafe fn dir_read_impl(ov: *mut Overlapped, handle: u64, buf: *mut u8, len: usi
         complete_io(ov, ERROR_BADF, 0);
         return;
     }
+    if (*file).dir_done && (*file).dir_pending_len == 0 {
+        complete_io(ov, 0, 0);
+        return;
+    }
+
+    let mut written = 0usize;
+    if (*file).dir_pending_len > 0 {
+        let plen = (*file).dir_pending_len as usize;
+        let need = 1 + plen + 1;
+        if need > len {
+            complete_io(ov, ERROR_INVALID, 0);
+            return;
+        }
+        buf.write((*file).dir_pending_kind);
+        let mut k = 0usize;
+        while k < plen {
+            buf.add(1 + k).write((*file).dir_pending_name[k]);
+            k += 1;
+        }
+        buf.add(1 + plen).write(0);
+        written += need;
+        (*file).dir_pending_len = 0;
+    }
+
+    if (*file).dir_done {
+        complete_io(ov, 0, written as u64);
+        return;
+    }
+
     let p_gfp = resolve_kernel32(b"GetFinalPathNameByHandleW\0");
     let p_fff = resolve_kernel32(b"FindFirstFileW\0");
     let p_fnf = resolve_kernel32(b"FindNextFileW\0");
@@ -207,29 +236,48 @@ unsafe fn dir_read_impl(ov: *mut Overlapped, handle: u64, buf: *mut u8, len: usi
     let fc: FindCloseFn = core::mem::transmute(p_fc);
     let w2m: WideCharToMultiByteFn = core::mem::transmute(p_w2m);
 
-    let mut path_w = [0u16; 520];
-    let n = gfp((*file).native_handle, path_w.as_mut_ptr(), 516, 0);
-    if n == 0 || n as usize >= 516 {
-        complete_io(ov, last_err(), 0);
-        return;
-    }
-    let mut idx = n as usize;
-    path_w.as_mut_ptr().add(idx).write(b'\\' as u16);
-    idx += 1;
-    path_w.as_mut_ptr().add(idx).write(b'*' as u16);
-    idx += 1;
-    path_w.as_mut_ptr().add(idx).write(0);
-
     let mut data: Win32FindDataW = core::mem::zeroed();
-    let find_h = fff(path_w.as_ptr(), &mut data);
-    if find_h == INVALID_HANDLE_VALUE || find_h.is_null() {
-        complete_io(ov, last_err(), 0);
-        return;
+    let mut have_entry = false;
+    if (*file).dir_find_handle.is_null() {
+        let mut path_w = [0u16; 520];
+        let n = gfp((*file).native_handle, path_w.as_mut_ptr(), 516, 0);
+        if n == 0 || n as usize >= 516 {
+            complete_io(ov, last_err(), 0);
+            return;
+        }
+        let mut idx = n as usize;
+        path_w.as_mut_ptr().add(idx).write(b'\\' as u16);
+        idx += 1;
+        path_w.as_mut_ptr().add(idx).write(b'*' as u16);
+        idx += 1;
+        path_w.as_mut_ptr().add(idx).write(0);
+
+        let find_h = fff(path_w.as_ptr(), &mut data);
+        if find_h == INVALID_HANDLE_VALUE || find_h.is_null() {
+            let err = last_err();
+            if err == ERROR_NOENT {
+                (*file).dir_done = true;
+                complete_io(ov, 0, written as u64);
+                return;
+            }
+            complete_io(ov, err, 0);
+            return;
+        }
+        (*file).dir_find_handle = find_h;
+        have_entry = true;
     }
 
-    let mut written = 0usize;
-    let hdr_size = core::mem::size_of::<AbiDirEntryHeader>();
     loop {
+        if !have_entry {
+            if fnf((*file).dir_find_handle, &mut data) == 0 {
+                let _ = fc((*file).dir_find_handle);
+                (*file).dir_find_handle = core::ptr::null_mut();
+                (*file).dir_done = true;
+                break;
+            }
+        }
+        have_entry = false;
+
         let mut wlen = 0i32;
         while (wlen as usize) < 260 && *data.file_name.as_ptr().add(wlen as usize) != 0 {
             wlen += 1;
@@ -246,37 +294,40 @@ unsafe fn dir_read_impl(ov: *mut Overlapped, handle: u64, buf: *mut u8, len: usi
             core::ptr::null_mut(),
         );
         if u8len > 0 {
-            let need = hdr_size + u8len as usize;
-            if written + need > len {
-                break;
+            let ulen = u8len as usize;
+            if (ulen == 1 && name_utf8[0] == b'.')
+                || (ulen == 2 && name_utf8[0] == b'.' && name_utf8[1] == b'.')
+            {
+                continue;
             }
             let kind = if data.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                STAT_KIND_SYMLINK
+                STAT_KIND_SYMLINK as u8
             } else if data.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                STAT_KIND_DIR
+                STAT_KIND_DIR as u8
             } else {
-                STAT_KIND_FILE
+                STAT_KIND_FILE as u8
             };
-            core::ptr::write_unaligned(
-                buf.add(written).cast::<AbiDirEntryHeader>(),
-                AbiDirEntryHeader {
-                    kind,
-                    name_len: u8len as u32,
-                },
-            );
+            let need = 1 + ulen + 1;
+            if written + need > len {
+                (*file).dir_pending_kind = kind;
+                (*file).dir_pending_len = ulen as u16;
+                let mut k = 0usize;
+                while k < ulen {
+                    (*file).dir_pending_name[k] = name_utf8[k];
+                    k += 1;
+                }
+                break;
+            }
+            buf.add(written).write(kind);
             let mut k = 0usize;
-            while k < u8len as usize {
-                buf.add(written + hdr_size + k)
-                    .write(*name_utf8.as_ptr().add(k));
+            while k < ulen {
+                buf.add(written + 1 + k).write(*name_utf8.as_ptr().add(k));
                 k += 1;
             }
+            buf.add(written + 1 + ulen).write(0);
             written += need;
         }
-        if fnf(find_h, &mut data) == 0 {
-            break;
-        }
     }
-    let _ = fc(find_h);
     complete_io(ov, 0, written as u64);
 }
 
@@ -321,7 +372,7 @@ unsafe fn path_stat_impl(
         complete_io(ov, ERROR_IO, 0);
         return;
     }
-    let wide = utf8_to_wide_alloc(path, len);
+    let wide = crate::win_ffi::path_utf8_to_wide_alloc(path, len);
     if wide.is_null() {
         complete_io(ov, ERROR_INVALID, 0);
         return;
@@ -349,14 +400,13 @@ unsafe fn path_stat_impl(
     let (as_s, as_n) = filetime_to_unix_ns(data.access_low, data.access_high);
     let (ms_s, ms_n) = filetime_to_unix_ns(data.write_low, data.write_high);
     let (cs_s, cs_n) = filetime_to_unix_ns(data.creation_low, data.creation_high);
-    st.atime_sec = as_s;
-    st.atime_nsec = as_n;
-    st.mtime_sec = ms_s;
-    st.mtime_nsec = ms_n;
-    st.ctime_sec = cs_s;
-    st.ctime_nsec = cs_n;
+    st.atime_ns = as_s.saturating_mul(1_000_000_000).saturating_add(as_n as i64);
+    st.mtime_ns = ms_s.saturating_mul(1_000_000_000).saturating_add(ms_n as i64);
+    st.ctime_ns = cs_s.saturating_mul(1_000_000_000).saturating_add(cs_n as i64);
+    st.btime_ns = st.ctime_ns;
     st.blksize = 4096;
-    st.blocks = (st.size + 511) / 512;
+    st.blocks = ((st.size + 511) / 512) as i64;
+    st.valid_mask = 0xFFFF;
     core::ptr::write(out.cast::<AbiStat>(), st);
     let _ = PATH_STAT_FLAG_NOFOLLOW;
     complete_io(ov, 0, need as u64);

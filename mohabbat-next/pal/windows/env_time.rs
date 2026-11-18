@@ -287,47 +287,104 @@ pub(crate) unsafe extern "C" fn pal_get_platform_info(out: *mut u8, cap: usize) 
     get_platform_info_impl(out, cap)
 }
 
+unsafe fn copy_str_field(dst: &mut [u8], src: &[u8]) {
+    let n = src.len().min(dst.len().saturating_sub(1));
+    let mut i = 0usize;
+    while i < n {
+        *dst.as_mut_ptr().add(i) = *src.as_ptr().add(i);
+        i += 1;
+    }
+}
+
 unsafe fn get_platform_info_impl(out: *mut u8, cap: usize) -> u32 {
     let needed = core::mem::size_of::<AbiPlatformInfo>();
     if out.is_null() || cap < needed {
         return ERROR_INVALID;
     }
     let mut info: AbiPlatformInfo = core::mem::zeroed();
-    info.os_kind = OS_KIND_WINDOWS;
+    info.path_separator = b'\\';
+    info.path_list_separator = b';';
+    info.os_kind = OS_KIND_WINDOWS as u16;
+    info.os_version = [10, 0, 0, 0];
     #[cfg(target_arch = "x86_64")]
     {
-        info.cpu_type = CPU_TYPE_X86_64;
+        info.cpu_type = CPU_TYPE_X86_64 as u16;
     }
     #[cfg(target_arch = "aarch64")]
     {
-        info.cpu_type = CPU_TYPE_AARCH64;
+        info.cpu_type = CPU_TYPE_AARCH64 as u16;
     }
-    info.abi_version = 1;
-    info.page_size = 4096;
-    let p = resolve_kernel32(b"GetCurrentProcessId\0");
-    if !p.is_null() {
-        let f: GetCurrentProcessIdFn = core::mem::transmute(p);
-        info.pid = f() as u64;
+    info.cpu_bitness = 64;
+    copy_str_field(&mut info.os_name, b"windows");
+    copy_str_field(&mut info.wasm_platform, b"mohabbat-next");
+    info.wasm_version = [0, 1, 0, 0];
+    copy_str_field(&mut info.wasm_version_str, b"0.1.0");
+    copy_str_field(&mut info.rusticated_name, b"rusticated");
+    info.rusticated_version = [0, 1, 0, 0];
+    copy_str_field(&mut info.rusticated_version_str, b"0.1.0");
+    #[cfg(target_arch = "x86_64")]
+    copy_str_field(&mut info.build_platform, b"windows/amd64");
+    #[cfg(target_arch = "aarch64")]
+    copy_str_field(&mut info.build_platform, b"windows/arm64");
+
+    let p_env = resolve_kernel32(b"GetEnvironmentVariableA\0");
+    if !p_env.is_null() {
+        #[cfg(target_arch = "x86_64")]
+        type GetEnvironmentVariableAFn = unsafe extern "win64" fn(*const u8, *mut u8, u32) -> u32;
+        #[cfg(target_arch = "aarch64")]
+        type GetEnvironmentVariableAFn = unsafe extern "C" fn(*const u8, *mut u8, u32) -> u32;
+        let f: GetEnvironmentVariableAFn = core::mem::transmute(p_env);
+        let _ = f(
+            b"USERPROFILE\0".as_ptr(),
+            info.user_home_dir.as_mut_ptr(),
+            info.user_home_dir.len() as u32,
+        );
     }
-    info.cpu_count = 1;
-    let p = resolve_kernel32(b"GetComputerNameA\0");
-    if !p.is_null() {
-        let f: GetComputerNameAFn = core::mem::transmute(p);
-        let mut n = info.hostname.len() as u32;
-        let _ = f(info.hostname.as_mut_ptr(), &mut n);
-    }
-    let p = resolve_kernel32(b"GetModuleFileNameA\0");
-    if !p.is_null() {
-        let f: GetModuleFileNameAFn = core::mem::transmute(p);
-        let _ = f(core::ptr::null_mut(), info.exe_path.as_mut_ptr(), info.exe_path.len() as u32);
-    }
-    let p = resolve_kernel32(b"GetTempPathA\0");
-    if !p.is_null() {
-        let f: GetTempPathAFn = core::mem::transmute(p);
+    let p_tmp = resolve_kernel32(b"GetTempPathA\0");
+    if !p_tmp.is_null() {
+        let f: GetTempPathAFn = core::mem::transmute(p_tmp);
         let _ = f(info.temp_dir.len() as u32, info.temp_dir.as_mut_ptr());
     }
+    let p_mem = resolve_kernel32(b"GlobalMemoryStatusEx\0");
+    if !p_mem.is_null() {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        #[cfg(target_arch = "x86_64")]
+        type GlobalMemoryStatusExFn = unsafe extern "win64" fn(*mut MemoryStatusEx) -> i32;
+        #[cfg(target_arch = "aarch64")]
+        type GlobalMemoryStatusExFn = unsafe extern "C" fn(*mut MemoryStatusEx) -> i32;
+        let f: GlobalMemoryStatusExFn = core::mem::transmute(p_mem);
+        let mut ms: MemoryStatusEx = core::mem::zeroed();
+        ms.length = core::mem::size_of::<MemoryStatusEx>() as u32;
+        if f(&mut ms) != 0 {
+            info.memory_slots[0].kind = 1; // MemKindSystemTotal
+            info.memory_slots[0].bytes = ms.total_phys;
+            info.memory_slots[1].kind = 2; // MemKindSystemAvail
+            info.memory_slots[1].bytes = ms.avail_phys;
+        }
+    }
+    info.system_context_version = 1;
     core::ptr::write(out.cast::<AbiPlatformInfo>(), info);
     0
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe extern "win64" fn pal_system_info_wait(ov: *mut Overlapped) {
+    complete_io(ov, crate::pal_abi::ERROR_UNSUPPORTED, 0);
+}
+#[cfg(target_arch = "aarch64")]
+pub(crate) unsafe extern "C" fn pal_system_info_wait(ov: *mut Overlapped) {
+    complete_io(ov, crate::pal_abi::ERROR_UNSUPPORTED, 0);
 }
 
 #[cfg(target_arch = "x86_64")]

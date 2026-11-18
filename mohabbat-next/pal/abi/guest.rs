@@ -83,45 +83,65 @@ pub struct AbiDirEntryHeader {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AbiStat {
-    pub dev: u64,
-    pub ino: u64,
     pub kind: u32,
     pub mode: u32,
-    pub nlink: u64,
-    pub size: u64,
-    pub atime_sec: i64,
-    pub atime_nsec: u32,
-    pub atime_pad: u32,
-    pub mtime_sec: i64,
-    pub mtime_nsec: u32,
-    pub mtime_pad: u32,
-    pub ctime_sec: i64,
-    pub ctime_nsec: u32,
-    pub ctime_pad: u32,
     pub uid: u32,
     pub gid: u32,
-    pub blksize: u64,
-    pub blocks: u64,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub atime_ns: i64,
+    pub ctime_ns: i64,
+    pub btime_ns: i64,
+    pub nlink: u64,
+    pub ino: u64,
+    pub dev: u64,
+    pub rdev: u64,
+    pub blksize: i64,
+    pub blocks: i64,
+    pub valid_mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AbiMemorySlot {
+    pub kind: u8,
+    pub flags: u8,
+    pub _pad: [u8; 6],
+    pub bytes: u64,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AbiPlatformInfo {
-    pub os_kind: u32,
-    pub cpu_type: u32,
-    pub abi_version: u32,
-    pub page_size: u32,
-    pub pid: u64,
-    pub ppid: u64,
-    pub uid: u32,
-    pub gid: u32,
-    pub cpu_count: u32,
     pub flags: u32,
-    pub hostname: [u8; 64],
-    pub os_release: [u8; 64],
-    pub exe_path: [u8; 256],
-    pub temp_dir: [u8; 256],
-    pub reserved: [u8; 80],
+    pub path_separator: u8,
+    pub path_list_separator: u8,
+    pub os_kind: u16,
+    pub os_version: [u16; 4],
+    pub cpu_type: u16,
+    pub cpu_bitness: u8,
+    pub _pad0: u8,
+    pub os_name: [u8; 64],
+    pub wasm_platform: [u8; 64],
+    pub wasm_version: [u16; 4],
+    pub wasm_version_str: [u8; 64],
+    pub rusticated_name: [u8; 64],
+    pub rusticated_version: [u16; 4],
+    pub rusticated_version_str: [u8; 64],
+    pub build_version: [u8; 64],
+    pub build_time: [u8; 64],
+    pub build_platform: [u8; 64],
+    pub user_home_dir: [u8; 64],
+    pub temp_dir: [u8; 64],
+    pub _pad1: [u8; 4],
+    pub memory_slots: [AbiMemorySlot; 16],
+    pub system_context_version: u32,
+    pub locale: [u8; 64],
+    pub time_zone: [u8; 64],
+    pub keyboard_layout_id: [u8; 128],
+    pub appearance: [u8; 32],
+    pub power_source: [u8; 32],
+    pub _pad2: [u8; 4],
 }
 
 #[repr(C)]
@@ -278,6 +298,7 @@ pub struct PalAbiTable {
     pub tty_get_size: pal_fn!(fn(handle: u64) -> u32),
     pub tty_set_size: pal_fn!(fn(handle: u64, cols: u32, rows: u32) -> u32),
     pub fd_isatty: pal_fn!(fn(handle: u32) -> u32),
+    pub system_info_wait: pal_fn!(fn(ov: *mut Overlapped)),
 }
 
 pub unsafe fn pack_args(
@@ -346,20 +367,19 @@ const _: () = {
     assert!(core::mem::offset_of!(AbiDirEntryHeader, kind) == 0);
     assert!(core::mem::offset_of!(AbiDirEntryHeader, name_len) == 4);
     assert!(core::mem::size_of::<AbiStat>() == 112);
-    assert!(core::mem::offset_of!(AbiStat, dev) == 0);
-    assert!(core::mem::offset_of!(AbiStat, ino) == 8);
-    assert!(core::mem::offset_of!(AbiStat, kind) == 16);
-    assert!(core::mem::offset_of!(AbiStat, size) == 32);
-    assert!(core::mem::offset_of!(AbiStat, mtime_sec) == 56);
-    assert!(core::mem::size_of::<AbiPlatformInfo>() == 768);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, os_kind) == 0);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, cpu_type) == 4);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, pid) == 16);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, hostname) == 48);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, exe_path) == 176);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, temp_dir) == 432);
-    assert!(core::mem::offset_of!(AbiPlatformInfo, reserved) == 688);
-    assert!(core::mem::size_of::<PalAbiTable>() == 47 * 8);
+    assert!(core::mem::offset_of!(AbiStat, kind) == 0);
+    assert!(core::mem::offset_of!(AbiStat, mode) == 4);
+    assert!(core::mem::offset_of!(AbiStat, size) == 16);
+    assert!(core::mem::offset_of!(AbiStat, mtime_ns) == 24);
+    assert!(core::mem::offset_of!(AbiStat, valid_mask) == 104);
+    assert!(core::mem::size_of::<AbiPlatformInfo>() == 1264);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, os_kind) == 6);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, cpu_type) == 16);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, os_name) == 20);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, temp_dir) == 612);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, memory_slots) == 680);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, system_context_version) == 936);
+    assert!(core::mem::size_of::<PalAbiTable>() == 48 * 8);
     assert!(core::mem::offset_of!(PalAbiTable, wasm_bytes) == 0);
     assert!(core::mem::offset_of!(PalAbiTable, wasm_len) == 8);
     assert!(core::mem::offset_of!(PalAbiTable, alloc_mem) == 16);
@@ -407,6 +427,7 @@ const _: () = {
     assert!(core::mem::offset_of!(PalAbiTable, tty_get_size) == 352);
     assert!(core::mem::offset_of!(PalAbiTable, tty_set_size) == 360);
     assert!(core::mem::offset_of!(PalAbiTable, fd_isatty) == 368);
+    assert!(core::mem::offset_of!(PalAbiTable, system_info_wait) == 376);
 };
 
 #[cfg(test)]

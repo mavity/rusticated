@@ -97,6 +97,7 @@ sync_stub!(unsupported_tty_set_mode(handle: u64, raw_mode: u32));
 sync_stub!(unsupported_tty_get_size(handle: u64) -> u32);
 sync_stub!(unsupported_tty_set_size(handle: u64, cols: u32, rows: u32) -> u32);
 sync_stub!(unsupported_fd_isatty(handle: u32) -> u32);
+async_stub!(unsupported_system_info_wait(ov: *mut Overlapped));
 
 pub fn for_payload(
     read: pal_fn!(fn(ov: *mut Overlapped, handle: u64, buf_ptr: *mut u8, buf_len: usize)),
@@ -151,5 +152,6 @@ pub fn for_payload(
         tty_get_size: unsupported_tty_get_size,
         tty_set_size: unsupported_tty_set_size,
         fd_isatty: unsupported_fd_isatty,
+        system_info_wait: unsupported_system_info_wait,
     }
 }

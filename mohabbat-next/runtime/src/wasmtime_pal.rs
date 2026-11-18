@@ -27,9 +27,9 @@ pub unsafe extern "C" fn wasmtime_page_size() -> usize {
         core::mem::size_of::<AbiPlatformInfo>(),
     );
     if rc == 0 {
-        let page = info.assume_init().page_size as usize;
-        if page >= 4096 && page.is_power_of_two() {
-            return page;
+        let info = info.assume_init();
+        if info.os_kind == 3 && info.cpu_type == 2 {
+            return 16384;
         }
     }
     4096

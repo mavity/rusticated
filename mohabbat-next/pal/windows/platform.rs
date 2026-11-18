@@ -278,6 +278,11 @@ struct FileHandle {
     sequential_head: *mut IoOperation,
     sequential_tail: *mut IoOperation,
     sequential_active: bool,
+    dir_find_handle: *mut c_void,
+    dir_done: bool,
+    dir_pending_kind: u8,
+    dir_pending_len: u16,
+    dir_pending_name: [u8; 520],
 }
 
 #[repr(C)]
@@ -375,8 +380,6 @@ const WAIT_OBJECT_0: u32 = 0;
 const INFINITE: u32 = u32::MAX;
 const STDIO_COMPLETION_KEY: usize = 0x535444494f;
 const IOCP_BATCH_SIZE: usize = 64;
-const CP_UTF8: u32 = 65001;
-const MB_ERR_INVALID_CHARS: u32 = 8;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_APPEND_DATA: u32 = 0x0000_0004;
@@ -393,9 +396,16 @@ const FILE_STANDARD_INFO_CLASS: u32 = 1;
 const FILE_END_OF_FILE_INFO_CLASS: u32 = 6;
 const ABI_O_CREATE: u32 = 0x40;
 const ABI_O_EXCL: u32 = 0x80;
+const ABI_O_NOCTTY: u32 = 0x100;
 const ABI_O_TRUNC: u32 = 0x200;
 const ABI_O_APPEND: u32 = 0x400;
+const ABI_O_NONBLOCK: u32 = 0x800;
+const ABI_O_DSYNC: u32 = 0x1000;
 const ABI_O_DIRECTORY: u32 = 0x2000;
+const ABI_O_LINUX_DIRECTORY: u32 = 0x10000;
+const ABI_O_NOFOLLOW: u32 = 0x20000;
+const ABI_O_CLOEXEC: u32 = 0x80000;
+const ABI_O_SYNC: u32 = 0x101000;
 
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
@@ -551,6 +561,11 @@ pub(crate) unsafe fn register_extra_handle(native_handle: *mut c_void) -> Option
         sequential_head: ptr::null_mut(),
         sequential_tail: ptr::null_mut(),
         sequential_active: false,
+        dir_find_handle: ptr::null_mut(),
+        dir_done: false,
+        dir_pending_kind: 0,
+        dir_pending_len: 0,
+        dir_pending_name: [0u8; 520],
     });
     (*state).file_handles = entry;
     Some(token)
@@ -641,8 +656,24 @@ unsafe fn free_io_operation(operation: *mut IoOperation) {
     }
 }
 
+unsafe fn close_dir_find_handle(file: *mut FileHandle) {
+    if !(*file).dir_find_handle.is_null() {
+        let p_fc = win_ffi::resolve_kernel32(b"FindClose\0");
+        if !p_fc.is_null() {
+            #[cfg(target_arch = "x86_64")]
+            type FindCloseFn = unsafe extern "win64" fn(*mut c_void) -> i32;
+            #[cfg(target_arch = "aarch64")]
+            type FindCloseFn = unsafe extern "C" fn(*mut c_void) -> i32;
+            let fc: FindCloseFn = core::mem::transmute(p_fc);
+            let _ = fc((*file).dir_find_handle);
+        }
+        (*file).dir_find_handle = ptr::null_mut();
+    }
+}
+
 unsafe fn close_file_record(file: *mut FileHandle) {
     let state = state_ptr();
+    close_dir_find_handle(file);
     if let Some(close) = ptr::addr_of!((*state).close_handle).read() {
         let _ = close((*file).native_handle);
     }
@@ -853,6 +884,7 @@ unsafe fn begin_io(
     let native_handle = match (handle, is_write) {
         (0, false) => ptr::addr_of!((*state).input_handle).read(),
         (1, true) => ptr::addr_of!((*state).output_handle).read(),
+        (2, true) => ptr::addr_of!((*state).error_handle).read(),
         _ => ptr::null_mut(),
     };
     if native_handle.is_null() {
@@ -998,7 +1030,19 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         return;
     }
     let access_mode = flags & 3;
-    let supported = 3 | ABI_O_CREATE | ABI_O_EXCL | ABI_O_TRUNC | ABI_O_APPEND | ABI_O_DIRECTORY;
+    let supported = 3
+        | ABI_O_CREATE
+        | ABI_O_EXCL
+        | ABI_O_NOCTTY
+        | ABI_O_TRUNC
+        | ABI_O_APPEND
+        | ABI_O_NONBLOCK
+        | ABI_O_DSYNC
+        | ABI_O_DIRECTORY
+        | ABI_O_LINUX_DIRECTORY
+        | ABI_O_NOFOLLOW
+        | ABI_O_CLOEXEC
+        | ABI_O_SYNC;
     if access_mode == 3
         || flags & !supported != 0
         || (flags & ABI_O_EXCL != 0 && flags & ABI_O_CREATE == 0)
@@ -1016,10 +1060,9 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         return;
     }
     let state = state_ptr();
-    let (Some(alloc), Some(free), Some(convert), Some(create_file), Some(create_port)) = (
+    let (Some(alloc), Some(free), Some(create_file), Some(create_port)) = (
         ptr::addr_of!((*state).alloc).read(),
         ptr::addr_of!((*state).free).read(),
-        ptr::addr_of!((*state).multi_byte_to_wide_char).read(),
         ptr::addr_of!((*state).create_file_w).read(),
         ptr::addr_of!((*state).create_io_completion_port).read(),
     ) else {
@@ -1034,45 +1077,8 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         }
         byte_index += 1;
     }
-    let wide_length = convert(
-        CP_UTF8,
-        MB_ERR_INVALID_CHARS,
-        path,
-        path_length as i32,
-        ptr::null_mut(),
-        0,
-    );
-    if wide_length <= 0 {
-        let error = ptr::addr_of!((*state).get_last_error)
-            .read()
-            .map(|get_last_error| get_last_error())
-            .unwrap_or(ERROR_INVALID_PARAMETER_CODE);
-        complete_io(ov, map_windows_error(error), 0);
-        return;
-    }
-    let Some(wide_capacity) = (wide_length as usize).checked_add(1) else {
-        complete_io(ov, ERROR_INVALID, 0);
-        return;
-    };
-    let Some(wide_bytes) = wide_capacity.checked_mul(core::mem::size_of::<u16>()) else {
-        complete_io(ov, ERROR_INVALID, 0);
-        return;
-    };
-    let wide_path = alloc(wide_bytes).cast::<u16>();
+    let wide_path = win_ffi::path_utf8_to_wide_alloc(path, path_length);
     if wide_path.is_null() {
-        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
-        return;
-    }
-    let converted = convert(
-        CP_UTF8,
-        MB_ERR_INVALID_CHARS,
-        path,
-        path_length as i32,
-        wide_path,
-        wide_length,
-    );
-    if converted != wide_length {
-        free(wide_path.cast());
         let error = ptr::addr_of!((*state).get_last_error)
             .read()
             .map(|get_last_error| get_last_error())
@@ -1080,7 +1086,6 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         complete_io(ov, map_windows_error(error), 0);
         return;
     }
-    wide_path.add(wide_length as usize).write(0);
 
     let mut desired_access = 0u32;
     if access & 1 != 0 {
@@ -1151,7 +1156,7 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         complete_io(ov, map_windows_error(error), 0);
         return;
     }
-    if flags & ABI_O_DIRECTORY != 0 {
+    if flags & (ABI_O_DIRECTORY | ABI_O_LINUX_DIRECTORY) != 0 {
         let Some(get_info) = ptr::addr_of!((*state).get_file_information_by_handle_ex).read()
         else {
             free(file.cast());
@@ -1204,6 +1209,11 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         sequential_head: ptr::null_mut(),
         sequential_tail: ptr::null_mut(),
         sequential_active: false,
+        dir_find_handle: ptr::null_mut(),
+        dir_done: false,
+        dir_pending_kind: 0,
+        dir_pending_len: 0,
+        dir_pending_name: [0u8; 520],
     });
     ptr::addr_of_mut!((*state).file_handles).write(file);
     ptr::addr_of_mut!((*state).next_file_token).write(after_token);
@@ -1911,6 +1921,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
     abi.tty_get_size = proc_tty::pal_tty_get_size;
     abi.tty_set_size = proc_tty::pal_tty_set_size;
     abi.fd_isatty = proc_tty::pal_fd_isatty;
+    abi.system_info_wait = env_time::pal_system_info_wait;
     abi.wasm_bytes = host.wasm_payload;
     abi.wasm_len = host.wasm_payload_size;
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi);
@@ -1940,6 +1951,7 @@ unsafe fn close_all_file_handles() {
     ptr::addr_of_mut!((*state).file_handles).write(ptr::null_mut());
     while !file.is_null() {
         let next = (*file).next;
+        close_dir_find_handle(file);
         if let Some(close) = close {
             close((*file).native_handle);
         }
@@ -2055,6 +2067,8 @@ mod tests {
             hello_payload_size: 0,
             argv: ptr::null(),
             argc: 0,
+            wasm_payload: ptr::null(),
+            wasm_payload_size: 0,
         };
         let get_last_error =
             function_pointer!(resolve(&host, module, b"GetLastError\0"), GetLastErrorFn).unwrap();
@@ -2604,7 +2618,7 @@ mod tests {
     #[test]
     fn test_windows_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
-        assert_eq!(size_of::<WindowsPlatformHost>(), 64);
+        assert_eq!(size_of::<WindowsPlatformHost>(), 80);
         assert_eq!(offset_of!(WindowsPlatformHost, load_library), 0);
         assert_eq!(offset_of!(WindowsPlatformHost, get_proc_address), 8);
         assert_eq!(offset_of!(WindowsPlatformHost, alloc), 16);
