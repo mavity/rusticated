@@ -66,6 +66,13 @@ The default local embedder, `embeddinggemma-2-text-270m.litertlm`, is
 native and browser-local setups, with browser cache state included in the
 estimate.
 
+Gemma 4 model downloads try the catalogued Hugging Face URL first, then the
+same filename at `https://assets.kabi.bi/`, and finally under
+`https://assets.kabi.bi/gemma4/`. The fallback also applies to direct browser
+model streams; browser deployments must allow the app origin through CORS on
+the asset domain. The LiteRT-LM runtime wheel remains sourced from PyPI, and
+the EmbeddingGemma model remains sourced from Hugging Face.
+
 `syscall.PlatformInfo` retains its 676-byte legacy prefix and appends sixteen
 16-byte tagged memory slots, for a 932-byte total layout. Memory kinds
 distinguish system total/available memory, GPU/NPU memory, unified memory, and

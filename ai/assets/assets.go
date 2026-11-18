@@ -196,7 +196,7 @@ func EnsureModel(ctx context.Context, url string, expectedSize int64, opts Fetch
 		return path, nil
 	}
 	opts.progress("download", filename, -1)
-	if err := downloadAndValidate(ctx, url, path, validate, opts); err != nil {
+	if err := downloadAndValidateFromSources(ctx, modelAssetURLs(url), path, validate, opts); err != nil {
 		return "", err
 	}
 	return path, nil

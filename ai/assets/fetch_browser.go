@@ -42,6 +42,24 @@ const browserAssetBootstrapJS = `
     }
   }
 
+  function modelURLs(url) {
+    const urls = [url];
+    try {
+      const parsed = new URL(url);
+      const filename = filenameOf(url);
+      if (parsed.hostname.toLowerCase() !== 'huggingface.co' ||
+          !/^gemma-4-.*\.litertlm$/i.test(filename)) {
+        return urls;
+      }
+      const encodedFilename = encodeURIComponent(filename);
+      urls.push(
+        'https://assets.kabi.bi/' + encodedFilename,
+        'https://assets.kabi.bi/gemma4/' + encodedFilename
+      );
+    } catch (e) {}
+    return urls;
+  }
+
   function responseMetadata(resp) {
     return {
       finalURL: resp.url || '',
@@ -88,10 +106,12 @@ const browserAssetBootstrapJS = `
       if (typeof caches !== 'undefined') {
         try {
           const cache = await caches.open(CACHE_NAME);
-          const resp = await cache.match(url);
-          if (resp) {
-            const metadata = responseMetadata(resp);
-            return Object.assign({ cached: true, size: metadata.contentLength, source: 'cache_storage' }, metadata);
+          for (const cacheURL of modelURLs(url)) {
+            const resp = await cache.match(cacheURL);
+            if (resp) {
+              const metadata = responseMetadata(resp);
+              return Object.assign({ cached: true, size: metadata.contentLength, source: 'cache_storage' }, metadata);
+            }
           }
         } catch (e) {}
       }
@@ -124,38 +144,49 @@ const browserAssetBootstrapJS = `
       if (typeof caches !== 'undefined') {
         try {
           const cache = await caches.open(CACHE_NAME);
-          const resp = await cache.match(url);
-          if (resp) {
-            const blob = await resp.blob();
-            return {
-              stream: blob.stream(),
-              provenance: Object.assign({
-                requestedURL: url,
-                readFrom: 'cache_storage',
-                cacheName: CACHE_NAME,
-                cacheKey: url,
-                size: blob.size
-              }, responseMetadata(resp), downloadMetadata(url))
-            };
+          for (const cacheURL of modelURLs(url)) {
+            const resp = await cache.match(cacheURL);
+            if (resp) {
+              const blob = await resp.blob();
+              return {
+                stream: blob.stream(),
+                provenance: Object.assign({
+                  requestedURL: url,
+                  readFrom: 'cache_storage',
+                  cacheName: CACHE_NAME,
+                  cacheKey: cacheURL,
+                  size: blob.size
+                }, responseMetadata(resp), downloadMetadata(url))
+              };
+            }
           }
         } catch (e) {}
       }
 
-      const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
-      if (!res.ok) {
-        throw new Error('fetch model failed: HTTP ' + res.status + ' from ' + (res.url || url));
+      const urls = modelURLs(url);
+      const failures = [];
+      for (const sourceURL of urls) {
+        try {
+          const res = await fetch(sourceURL, { mode: 'cors', credentials: 'omit' });
+          if (!res.ok) {
+            throw new Error('HTTP ' + res.status + ' from ' + (res.url || sourceURL));
+          }
+          if (!res.body) {
+            throw new Error('no response body from ' + (res.url || sourceURL));
+          }
+          return {
+            stream: res.body,
+            provenance: Object.assign({
+              requestedURL: url,
+              readFrom: 'network',
+              size: 0
+            }, responseMetadata(res))
+          };
+        } catch (e) {
+          failures.push(String(e?.message || e));
+        }
       }
-      if (!res.body) {
-        throw new Error('fetch model returned no response body from ' + (res.url || url));
-      }
-      return {
-        stream: res.body,
-        provenance: Object.assign({
-          requestedURL: url,
-          readFrom: 'network',
-          size: 0
-        }, responseMetadata(res))
-      };
+      throw new Error('fetch model failed from all sources: ' + failures.join('; '));
     },
 
     startDownload(url) {
@@ -198,69 +229,98 @@ const browserAssetBootstrapJS = `
 
           const fname = filenameOf(url);
           const root = await getOPFSDirectory();
-          const resp = await fetch(url, {
-            mode: 'cors',
-            credentials: 'omit',
-            signal: ctrl.signal
-          });
-          if (!resp.ok) {
-            throw new Error('download failed HTTP ' + resp.status + ' from ' + (resp.url || url));
-          }
-
-          const metadata = responseMetadata(resp);
-          state.finalURL = metadata.finalURL;
-          state.httpStatus = metadata.httpStatus;
-          state.contentType = metadata.contentType;
-
-          const cl = resp.headers.get('content-length');
-          if (cl) {
-            state.total = parseInt(cl, 10) || 0;
-          }
-
-          if (root && typeof root.getFileHandle === 'function') {
-            // Stream to OPFS
-            state.storedIn = 'opfs';
-            const fh = await root.getFileHandle(fname, { create: true });
-            const writable = await fh.createWritable();
-            const reader = resp.body.getReader();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                await writable.write(value);
-                state.received += value.byteLength;
-                if (state.total > 0) {
-                  state.percent = Math.floor((state.received / state.total) * 100);
-                }
+          const urls = modelURLs(url);
+          const failures = [];
+          for (const sourceURL of urls) {
+            let writable = null;
+            try {
+              const resp = await fetch(sourceURL, {
+                mode: 'cors',
+                credentials: 'omit',
+                signal: ctrl.signal
+              });
+              if (!resp.ok) {
+                throw new Error('HTTP ' + resp.status + ' from ' + (resp.url || sourceURL));
               }
-            }
-            await writable.close();
-          } else if (typeof caches !== 'undefined') {
-            // Stream clone to CacheStorage
-            state.storedIn = 'cache_storage';
-            const cache = await caches.open(CACHE_NAME);
-            const clone = resp.clone();
-            const reader = resp.body.getReader();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                state.received += value.byteLength;
-                if (state.total > 0) {
-                  state.percent = Math.floor((state.received / state.total) * 100);
-                }
-              }
-            }
-            await cache.put(url, clone);
-          } else {
-            // Memory fallback
-            state.storedIn = 'memory_only';
-            const buf = await resp.arrayBuffer();
-            state.received = buf.byteLength;
-          }
 
-          state.done = true;
-          state.percent = 100;
+              state.received = 0;
+              state.total = 0;
+              state.percent = 0;
+              state.finalURL = '';
+              state.httpStatus = 0;
+              state.contentType = '';
+              state.storedIn = '';
+              const metadata = responseMetadata(resp);
+              state.finalURL = metadata.finalURL;
+              state.httpStatus = metadata.httpStatus;
+              state.contentType = metadata.contentType;
+
+              const cl = resp.headers.get('content-length');
+              if (cl) {
+                state.total = parseInt(cl, 10) || 0;
+              }
+
+              if (root && typeof root.getFileHandle === 'function') {
+                state.storedIn = 'opfs';
+                const fh = await root.getFileHandle(fname, { create: true });
+                writable = await fh.createWritable();
+                const reader = resp.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (value) {
+                    await writable.write(value);
+                    state.received += value.byteLength;
+                    if (state.total > 0) {
+                      state.percent = Math.floor((state.received / state.total) * 100);
+                    }
+                  }
+                }
+                await writable.close();
+              } else if (typeof caches !== 'undefined') {
+                state.storedIn = 'cache_storage';
+                const cache = await caches.open(CACHE_NAME);
+                const clone = resp.clone();
+                const reader = resp.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (value) {
+                    state.received += value.byteLength;
+                    if (state.total > 0) {
+                      state.percent = Math.floor((state.received / state.total) * 100);
+                    }
+                  }
+                }
+                await cache.put(sourceURL, clone);
+              } else {
+                state.storedIn = 'memory_only';
+                const buf = await resp.arrayBuffer();
+                state.received = buf.byteLength;
+              }
+
+              state.done = true;
+              state.percent = 100;
+              return;
+            } catch (e) {
+              failures.push(String(e?.message || e));
+              if (writable) {
+                try { await writable.abort(); } catch (abortError) {}
+              }
+              if (root && state.storedIn === 'opfs') {
+                try { await root.removeEntry(fname); } catch (removeError) {}
+              }
+              state.received = 0;
+              state.total = 0;
+              state.percent = 0;
+              state.finalURL = '';
+              state.httpStatus = 0;
+              state.contentType = '';
+              state.storedIn = '';
+              if (ctrl.signal.aborted) break;
+            }
+          }
+          throw new Error('download failed from all sources: ' + failures.join('; '));
         } catch (e) {
           state.error = e?.message || String(e);
           state.done = true;

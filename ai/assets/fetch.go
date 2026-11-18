@@ -168,6 +168,24 @@ func downloadAndValidate(ctx context.Context, url, path string, validate func(st
 	return os.Rename(tmp, path)
 }
 
+func downloadAndValidateFromSources(ctx context.Context, urls []string, dest string, validate func(string) error, opts FetchOptions) error {
+	var failures []error
+	for _, url := range urls {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := downloadAndValidate(ctx, url, dest, validate, opts); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", url, err))
+			continue
+		}
+		return nil
+	}
+	if len(failures) == 0 {
+		return fmt.Errorf("no download sources provided for %s", filepath.Base(dest))
+	}
+	return fmt.Errorf("download %s from all sources failed: %w", filepath.Base(dest), errors.Join(failures...))
+}
+
 func fetchContentLength(ctx context.Context, url string) int64 {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {

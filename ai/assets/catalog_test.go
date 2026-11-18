@@ -48,6 +48,31 @@ func TestModelTiersReturnsIndependentSlice(t *testing.T) {
 	}
 }
 
+func TestModelAssetURLsUseHuggingFaceBeforeR2Fallbacks(t *testing.T) {
+	url := "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+	got := modelAssetURLs(url)
+	want := []string{
+		url,
+		"https://assets.kabi.bi/gemma-4-E2B-it.litertlm",
+		"https://assets.kabi.bi/gemma4/gemma-4-E2B-it.litertlm",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("modelAssetURLs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestModelAssetURLsDoNotFallbackForOtherHostsOrModels(t *testing.T) {
+	for _, url := range []string{
+		"https://example.test/gemma-4-E2B-it.litertlm",
+		"https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm",
+	} {
+		got := modelAssetURLs(url)
+		if len(got) != 1 || got[0] != url {
+			t.Errorf("modelAssetURLs(%q) = %#v, want only the original URL", url, got)
+		}
+	}
+}
+
 func TestHardwareTierRecommendation(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -125,4 +150,3 @@ func TestDefaultCacheDirHasValidNativeFormat(t *testing.T) {
 		}
 	}
 }
-

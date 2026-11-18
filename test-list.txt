@@ -1,0 +1,837 @@
+# List of tests to replicate from Washmhost
+
+The rigorous suite contains **44 top-level test functions** and approximately **260 nested subtests**.
+
+## Platform, initialization, lifecycle
+
+- `TestNewHostEnvExhaustive`
+  - 11 initialization/lifecycle subtests
+- `TestNewHostEnvExtendedState`
+  - 11 state/queue/cancellation subtests
+- `TestRegisterOpExtended`
+- `TestIsOpActiveExtended`
+- `TestDecOpsExtended`
+- `TestCancelOpExtended`
+- `TestSysMisc`
+  - debug logging, signal registration/fire/overwrite/cancellation, errno translation, overlapped writes, arguments, environment, polling
+- `TestResolveUsableCwd` is nested inside `TestSysMisc`, not a separate top-level test.
+
+## Time and timers
+
+- `TestSysTimeNowExhaustive`
+- `TestSysGetTimeExhaustive`
+- `TestSysGetRandomExhaustive`
+- `TestSysTimerSetExtended`
+
+Together these cover monotonicity, precision, concurrency, stress, random data, cancellation, timer overwrite, queued callbacks, memory boundaries, and Unix-epoch sanity.
+
+## Arguments, environment, CWD, and processes
+
+- `TestGuestEnvCanonicalizesWindowsPathAliases`
+- `TestGuestEnvDoesNotExposeWashmhostHostSettings`
+- `TestGuestEnvPreservesWindowsUserDirs`
+- `TestGuestEnvExpandsPercentVarInPath`
+- `TestGuestEnvDoesNotRewriteTempOrUserPaths`
+- `TestSysProcEnv`
+
+`TestSysProcEnv` includes 15 subtests covering argument/environment metadata and retrieval, small and exact buffers, CWD changes and invalid paths, process spawning, waiting and signaling, invalid executables, environment stress, and PTY spawning/read/write/resize.
+
+- `TestStartWithPtyChildCanUseControllingTerminal`
+
+## Platform info and system context
+
+- `TestResolveGuestDriveRootedPathDoesNotPrefixCwd`
+- `TestSysGetPlatformInfoCanonicalizesHostPaths`
+- `TestSysGetPlatformInfoSerializesSystemContext`
+- `TestSystemInfoWaitCompletesWhenContextChanges`
+- `TestCancelSystemInfoWaitRemovesWaiterAndTimer`
+
+## Filesystem operations
+
+- `TestSysFs`
+  - create/open/write/read/stat
+  - missing files
+  - chmod and special POSIX bits
+  - directory reads
+  - jail-break behavior
+  - EOF
+  - read-only handles
+  - directory-on-file errors
+  - double close
+  - invalid handles
+
+- `TestSysHandleTruncate`
+- `TestMapErrnoEFBIG`
+- `TestSysReadExtended`
+  - 20 subtests covering small, zero, EOF, invalid handles and memory, write-only handles, large reads, sequential and positioned reads, unsupported flags, overflow, cancellation, directories, partial reads, concurrency, stdin, removed/closed descriptors, huge lengths, seek, memory boundaries, and queue stress
+
+- `TestSysWriteExtended`
+  - 20 subtests covering small/zero/large writes, stdout/stderr, invalid handles and memory, read-only handles, sequential/concurrent writes, append, cancellation, removed/closed descriptors, huge lengths, read-back consistency, memory boundaries, short writes, and cross-boundary writes
+
+- `TestDirEntryUnknownTypeUsesFileKind`
+- `TestSysDirReadExtended`
+  - 25 subtests covering complete and fragmented reads, empty directories, exact-sized buffers, EBADF/EINVAL, file handles, state persistence, handle hijacking, concurrency, large and pathological directories, cancellation, EOF, reopen freshness, huge lengths, buffer overwrite, partial resumes, multiple entries, leftovers, interleaved stat calls, and drainage
+
+- `TestSysPathSetTimes`
+- `TestSysPathSetTimesNoFollowSymlink`
+
+## Links and metadata
+
+- `TestPathLinkOperations`
+- `TestCreateAbiStat`
+- `TestCreateAbiStatUsesNativeMetadata`
+- `TestStatModeAndKindPreservesUnixTypeAndSpecialBits`
+- `TestPosixModeToGoFileModePreservesSpecialBits`
+- `TestMarshalAbiStat`
+
+## Networking
+
+- `TestSysNet`
+  - 14 subtests covering listen, loopback dial, accept, invalid addresses and handles, network read/write, concurrent dials and accepts, listener closure, closed handles, localhost, and accept pressure
+
+## Miscellaneous environment and runtime tests
+
+- `TestGuestRuntimeEnvOmitsCwdValues`
+- `TestHostEnvTracksModuleCwd`
+- `TestGuestRuntimeEnvDoesNotInjectHostHomeAndTemp`
+- `TestDecodeWashmhostGuestArgs`
+- `TestRunHostHonorsTestTimeout`
+
+This is a **host implementation suite**, not an executable cross-implementation Rusticated PAL conformance suite. The old suite can reveal defects in `washmhost`, but it cannot prove that Mohabbat-next’s native or WASM PAL implementations implement the same contracts.
+
+
+# Mohabbat-Next tests
+
+================================================================================
+🧪  Mohabbat-Next Unified Test Summary
+================================================================================
+  ✅ PASS     [build/all             ] go run ./build                       (1m5.018s)
+  ✅ PASS     [unit/go               ] mohabbat-next/build                  (8.514s)
+  ✅ PASS     [unit/zig              ] pal/abi/guest.zig                    (1.079s)
+  ✅ PASS     [unit/zig              ] payload/hello.zig, fileio.zig & abi_conformance.zig (385ms)
+  ✅ PASS     [unit/zig              ] brot/unix (pool + zstd)              (128ms)
+  ✅ PASS     [unit/zig              ] pal/windows & pal/unix               (4.358s)
+  ✅ PASS     [unit/zig              ] runtime/zwasm                        (1.811s)
+  ✅ PASS     [unit/csharp           ] WindowsHost (--unit-test)            (1.034s)
+  ✅ PASS     [artifact/polyglot     ] mz-pe-header-and-dos-stub            (6ms)
+  ✅ PASS     [artifact/flat-bins    ] zero-relocs-and-size-bounds          (1ms)
+  ✅ PASS     [artifact/raw-entry    ] hello-entry-symbol-at-byte-zero      (202ms)
+  ✅ PASS     [artifact/runtime-slices] zero-relocs-and-clean-sections       (389ms)
+  ✅ PASS     [windows/arm64-native  ] verify-components                    (177ms)
+  ✅ PASS     [windows/arm64-native  ] interactive-echo-crlf-lf             (336ms)
+  ✅ PASS     [windows/arm64-native  ] immediate-eof-exit-0                 (229ms)
+  ✅ PASS     [windows/arm64-native  ] partial-line-eof-discards-line       (171ms)
+  ✅ PASS     [windows/arm64-native  ] line-capacity-255                    (190ms)
+  ✅ PASS     [windows/arm64-native  ] line-capacity-256                    (182ms)
+  ✅ PASS     [windows/arm64-native  ] line-capacity-counts-utf8-bytes      (256ms)
+  ✅ PASS     [windows/arm64-native  ] cr-only-line-separators              (217ms)
+  ✅ PASS     [windows/arm64-native  ] line-overflow-257-exit-2             (190ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-binary-unicode-and-positional-read (161ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-maximum-transfer-boundary     (162ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-simultaneous-64-positioned-reads (154ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-missing-exclusive-and-open-truncate (152ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-zero-length-and-repeated-eof  (154ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-seek-truncate-extend-and-shrink (160ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-append-and-independent-handles (152ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-access-modes-close-and-reopen (160ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-directory-open-and-close      (149ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-create-existing-preserves-data (192ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-create-new-without-exclusive  (1.319s)
+  ✅ PASS     [windows/arm64-native  ] fileio-duplicate-handle-name-rejected (6.949s)
+  ✅ PASS     [windows/arm64-native  ] fileio-short-read-reports-eof        (216ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-exact-read-does-not-report-eof (174ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-positioned-read-at-eof-preserves-cursor (191ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-negative-relative-seek-rejected (164ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-seek-past-end-write-zero-fills-gap (255ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-negative-truncate-rejected    (167ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-close-twice-rejects-stale-handle (160ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-unknown-handle-rejected       (162ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-one-byte-transfer             (161ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-near-maximum-transfer-boundary (170ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-path-with-spaces              (159ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-append-multiple-writes-after-seek (159ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-truncate-to-existing-length   (168ms)
+  ✅ PASS     [windows/arm64-native  ] fileio-truncate-shrinks-to-exact-length (184ms)
+  ✅ PASS     [windows/amd64-emulated] x64-host-artifact                    (0s)
+  ✅ PASS     [windows/amd64-emulated] verify-components                    (5.426s)
+  ✅ PASS     [windows/amd64-emulated] interactive-echo-crlf-lf             (496ms)
+  ✅ PASS     [windows/amd64-emulated] immediate-eof-exit-0                 (467ms)
+  ✅ PASS     [windows/amd64-emulated] partial-line-eof-discards-line       (451ms)
+  ✅ PASS     [windows/amd64-emulated] line-capacity-255                    (567ms)
+  ✅ PASS     [windows/amd64-emulated] line-capacity-256                    (535ms)
+  ✅ PASS     [windows/amd64-emulated] line-capacity-counts-utf8-bytes      (515ms)
+  ✅ PASS     [windows/amd64-emulated] cr-only-line-separators              (482ms)
+  ✅ PASS     [windows/amd64-emulated] line-overflow-257-exit-2             (541ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-binary-unicode-and-positional-read (506ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-maximum-transfer-boundary     (510ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-simultaneous-64-positioned-reads (522ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-missing-exclusive-and-open-truncate (554ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-zero-length-and-repeated-eof  (516ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-seek-truncate-extend-and-shrink (516ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-append-and-independent-handles (524ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-access-modes-close-and-reopen (510ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-directory-open-and-close      (494ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-create-existing-preserves-data (498ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-create-new-without-exclusive  (493ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-duplicate-handle-name-rejected (501ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-short-read-reports-eof        (506ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-exact-read-does-not-report-eof (496ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-positioned-read-at-eof-preserves-cursor (503ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-negative-relative-seek-rejected (526ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-seek-past-end-write-zero-fills-gap (512ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-negative-truncate-rejected    (483ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-close-twice-rejects-stale-handle (486ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-unknown-handle-rejected       (482ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-one-byte-transfer             (475ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-near-maximum-transfer-boundary (488ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-path-with-spaces              (499ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-append-multiple-writes-after-seek (533ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-truncate-to-existing-length   (513ms)
+  ✅ PASS     [windows/amd64-emulated] fileio-truncate-shrinks-to-exact-length (487ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] interactive-echo-crlf-lf             (1.202s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] immediate-eof-exit-0                 (1.06s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] partial-line-eof-discards-line       (1.078s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] line-capacity-255                    (1.147s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] line-capacity-256                    (1.21s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] line-capacity-counts-utf8-bytes      (1.125s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] cr-only-line-separators              (1.032s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] line-overflow-257-exit-2             (1.05s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-binary-unicode-and-positional-read (1.075s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-maximum-transfer-boundary     (1.26s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-simultaneous-64-positioned-reads (1.858s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-missing-exclusive-and-open-truncate (1.335s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-zero-length-and-repeated-eof  (1.135s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-seek-truncate-extend-and-shrink (1.25s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-append-and-independent-handles (1.112s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-access-modes-close-and-reopen (1.229s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-directory-open-and-close      (1.146s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-create-existing-preserves-data (1.104s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-create-new-without-exclusive  (1.233s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-duplicate-handle-name-rejected (1.089s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-short-read-reports-eof        (1.09s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-exact-read-does-not-report-eof (1.056s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-positioned-read-at-eof-preserves-cursor (1.202s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-negative-relative-seek-rejected (1.125s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-seek-past-end-write-zero-fills-gap (1.005s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-negative-truncate-rejected    (1.004s)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-close-twice-rejects-stale-handle (969ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-unknown-handle-rejected       (967ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-one-byte-transfer             (954ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-near-maximum-transfer-boundary (960ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-path-with-spaces              (910ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-append-multiple-writes-after-seek (834ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-truncate-to-existing-length   (836ms)
+  ✅ PASS     [linux/wsl (Linux aarch64)] fileio-truncate-shrinks-to-exact-length (862ms)
+  ⚪ DISABLED [android/aarch64       ] bundle-acceptance                   
+     ↳ not in Termux and exec.LookPath("adb") failed: exec: "adb": executable file not found in %PATH%
+  ⚪ DISABLED [darwin/native         ] bundle-acceptance                   
+     ↳ host GOOS=windows/arm64 cannot execute Darwin Mach-O binaries locally
+  ✅ PASS     [abi/native-arm64      ] misc                                 (153ms)
+  ✅ PASS     [abi/native-arm64      ] timer                                (208ms)
+  ✅ PASS     [abi/native-arm64      ] fs                                   (132ms)
+  ✅ PASS     [abi/native-arm64      ] links                                (135ms)
+  ✅ PASS     [abi/native-arm64      ] net                                  (137ms)
+  ✅ PASS     [abi/native-arm64      ] proc                                 (135ms)
+  ✅ PASS     [abi/wsl-aarch64       ] misc                                 (843ms)
+  ✅ PASS     [abi/wsl-aarch64       ] timer                                (866ms)
+  ✅ PASS     [abi/wsl-aarch64       ] fs                                   (841ms)
+  ✅ PASS     [abi/wsl-aarch64       ] links                                (837ms)
+  ✅ PASS     [abi/wsl-aarch64       ] net                                  (937ms)
+  ✅ PASS     [abi/wsl-aarch64       ] proc                                 (837ms)
+  ✅ PASS     [runtime/aarch64-native] empty-function-codegen               (62ms)
+  ✅ PASS     [runtime/aarch64-native] store-only-codegen                   (57ms)
+  ✅ PASS     [runtime/aarch64-native] integer-add-store-codegen            (57ms)
+  ✅ PASS     [runtime/aarch64-native] load-add-store-cold-and-warm         (57ms)
+  ✅ PASS     [runtime/aarch64-native] wasm-import-call-get-time            (81ms)
+  ✅ PASS     [runtime/x86_64-emulated] empty-function-codegen               (3.736s)
+  ✅ PASS     [runtime/x86_64-emulated] store-only-codegen                   (229ms)
+  ✅ PASS     [runtime/x86_64-emulated] integer-add-store-codegen            (227ms)
+  ✅ PASS     [runtime/x86_64-emulated] load-add-store-cold-and-warm         (260ms)
+  ✅ PASS     [runtime/x86_64-emulated] wasm-import-call-get-time            (241ms)
+  ✅ PASS     [wasm/go               ] ai/assets                            (5.442s)
+  ✅ PASS     [wasm/go               ] ai                                   (37.909s)
+  ❌ FAIL     [wasm/go               ] ai/perftest                          (6.327s)
+     ↳ exit status 1
+  ❌ FAIL     [wasm/rust             ] demo                                 (3.416s)
+     ↳ cargo test --no-run failed: exit status 101
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\dload\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+   Compiling demo v0.8.37 (C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\demo)
+error: could not compile `demo` (bin "demo" test) due to 13 previous errors
+
+  ❌ FAIL     [wasm/rust             ] demo/loch                            (6.899s)
+     ↳ cargo test --no-run failed: exit status 101
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\dload\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+   Compiling thiserror-impl v2.0.18
+   Compiling darling_core v0.23.0
+   Compiling strum_macros v0.27.2
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling either v1.16.0
+   Compiling cfg-if v1.0.4
+error: could not compile `foldhash` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `equivalent` (lib) due to 1 previous error
+error: could not compile `cfg-if` (lib) due to 1 previous error
+error: could not compile `either` (lib) due to 1 previous error
+error: could not compile `allocator-api2` (lib) due to 1 previous error
+
+  ❌ FAIL     [wasm/go               ] dload                                (4.65s)
+     ↳ exit status 2
+  ✅ PASS     [wasm/go               ] kabibi                               (4m56.72s)
+  ✅ PASS     [wasm/go               ] kabibi/config                        (28.949s)
+  ✅ PASS     [wasm/go               ] kabibi/credstore                     (17.575s)
+  ✅ PASS     [wasm/go               ] kabibi/gitcore                       (28.222s)
+  ✅ PASS     [wasm/go               ] kabibi/slashcmd                      (12.797s)
+  ✅ PASS     [wasm/go               ] kabibi/tools/browser                 (18.791s)
+  ✅ PASS     [wasm/go               ] kabibi/tools/fabric                  (15.921s)
+  ✅ PASS     [wasm/go               ] kabibi/tools/filelist                (17.766s)
+  ✅ PASS     [wasm/go               ] kabibi/tools/hashline                (15.865s)
+  ❌ FAIL     [wasm/go               ] kabibi/ui/app                        (5m13.552s)
+     ↳ exit status 2
+  ❌ FAIL     [wasm/go               ] kabibi/ui/dialog                     (39.604s)
+     ↳ exit status 2
+  ✅ PASS     [wasm/go               ] kabibi/ui/editor                     (48.791s)
+  ✅ PASS     [wasm/go               ] kabibi/ui/filemanager                (16.488s)
+  ✅ PASS     [wasm/go               ] kabibi/ui                            (22.238s)
+  ❌ FAIL     [wasm/go               ] kabibi/ui/shell                      (11m2.764s)
+     ↳ no stdout/stderr output for 10m0s; host process terminated: exit status 1
+  ✅ PASS     [wasm/go               ] kabibi/ui/terminal                   (46.037s)
+  ✅ PASS     [wasm/go               ] kabibi/ui/widgets                    (10.851s)
+  ❌ FAIL     [wasm/rust             ] kabibi-rust                          (4.739s)
+     ↳ cargo test --no-run failed: exit status 101
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\dload\Cargo.toml
+workspace: C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\Cargo.toml
+   Compiling darling_macro v0.23.0
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling either v1.16.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling static_assertions v1.1.0
+   Compiling thiserror v2.0.18
+error: could not compile `foldhash` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `equivalent` (lib) due to 1 previous error
+error: could not compile `thiserror` (lib) due to 1 previous error
+error: could not compile `static_assertions` (lib) due to 1 previous error
+error: could not compile `either` (lib) due to 1 previous error
+error: could not compile `unicode-segmentation` (lib) due to 1 previous error
+error: could not compile `allocator-api2` (lib) due to 1 previous error
+
+  ✅ PASS     [wasm/go               ] platform                             (2.359s)
+  ❌ FAIL     [wasm/go               ] pope                                 (5.274s)
+     ↳ exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/cluster/nodestats        (237ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\cluster\nodestats: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/backoff             (153ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\backoff: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/base64              (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\base64: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/basename            (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\basename: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/blkid               (162ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\blkid: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/brctl               (146ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\brctl: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/cat                 (153ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\cat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/chmod               (298ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\chmod: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/chroot              (238ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\chroot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/cmp                 (298ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\cmp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/comm                (150ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\comm: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/cp                  (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\cp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/cpio                (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\cpio: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/date                (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\date: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/dd                  (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\dd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/df                  (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\df: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/dhclient            (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\dhclient: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/dirname             (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\dirname: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/dmesg               (114ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\dmesg: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/du                  (138ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\du: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/echo                (153ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\echo: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/false               (142ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\false: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/find                (152ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\find: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/free                (153ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\free: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/fusermount          (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\fusermount: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/gosh                (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\gosh: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/gpgv                (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\gpgv: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/grep                (158ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\grep: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/gzip                (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\gzip: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/head                (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\head: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/hexdump             (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\hexdump: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/hostname            (114ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\hostname: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/id                  (113ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\id: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ip                  (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ip: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/kexec               (111ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\kexec: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/kill                (128ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\kill: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/lddfiles            (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\lddfiles: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ln                  (136ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ln: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ls                  (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ls: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/lsdrivers           (147ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\lsdrivers: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/lsfd                (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\lsfd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/lsmod               (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\lsmod: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/man/gen             (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\man\gen: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/man                 (128ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\man: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/md5sum              (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\md5sum: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mkdir               (147ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mkdir: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mkfifo              (217ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mkfifo: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mknod               (178ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mknod: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mktemp              (277ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mktemp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/more                (160ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\more: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mount               (160ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mount: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/mv                  (148ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\mv: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/netcat              (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\netcat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/netstat             (178ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\netstat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/nohup               (131ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\nohup: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/pci                 (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\pci: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/pidof               (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\pidof: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ping                (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ping: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/printenv            (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\printenv: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ps                  (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ps: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/pwd                 (141ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\pwd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/readlink            (138ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\readlink: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/realpath            (183ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\realpath: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/rg                  (139ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\rg: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/rm                  (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\rm: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/scp                 (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\scp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/search              (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\search: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/searchcompat        (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\searchcompat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/sed                 (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\sed: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/seq                 (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\seq: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/service             (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\service: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/shasum              (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\shasum: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/shutdown            (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\shutdown: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/sleep               (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\sleep: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/sort                (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\sort: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/sshd                (169ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\sshd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/strace              (214ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\strace: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/strings             (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\strings: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/stty                (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\stty: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/sync                (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\sync: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tail                (149ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tail: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tar                 (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tar: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tee                 (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tee: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/time                (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\time: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/timeout             (114ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\timeout: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/touch               (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\touch: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tr                  (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tr: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/true                (123ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\true: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/truncate            (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\truncate: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ts                  (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ts: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tsort               (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tsort: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/tty                 (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\tty: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/ufs                 (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\ufs: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/uname               (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\uname: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/uniq                (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\uniq: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/unshare             (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\unshare: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/update-rc.d         (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\update-rc.d: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/uptime              (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\uptime: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/watchdog            (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\watchdog: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/watchdogd           (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\watchdogd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/wc                  (179ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\wc: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/wget                (135ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\wget: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/which               (131ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\which: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/xargs               (136ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\xargs: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/core/yes                 (148ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\core\yes: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/ansi                 (142ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\ansi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/bzimage              (176ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\bzimage: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/cbmem                (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\cbmem: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/cmd2pkg              (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\cmd2pkg: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/cmd2pkg/findpkg      (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\cmd2pkg\findpkg: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/cmd2pkg/test         (2.211s)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\cmd2pkg\test: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/crc                  (137ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\crc: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/dmidecode            (137ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\dmidecode: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/ed                   (131ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\ed: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/efivarfs             (140ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\efivarfs: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/esxiboot             (133ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\esxiboot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/freq                 (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\freq: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/localboot            (219ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\localboot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/modprobe             (185ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\modprobe: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/newsshd              (228ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\newsshd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/nvme_unlock          (180ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\nvme_unlock: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/pox                  (147ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\pox: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/readelf              (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\readelf: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/rush                 (131ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\rush: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/serial               (177ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\serial: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/srvfiles             (176ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\srvfiles: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/ssh                  (211ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\ssh: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/tac                  (172ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\tac: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/tc                   (140ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\tc: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/tcpdump              (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\tcpdump: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/tftp                 (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\tftp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/exp/traceroute           (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\exp\traceroute: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/cmds/fwtools/spidev           (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\cmds\fwtools\spidev: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/integration/generic-tests     (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\integration\generic-tests: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/integration/generic-tests-cpu (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\integration\generic-tests-cpu: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/integration/gotests           (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\integration\gotests: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/acpi                      (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\acpi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/acpi/fpdt/fbpt            (161ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\acpi\fpdt\fbpt: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/acpi/fpdt                 (139ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\acpi\fpdt: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/align                     (308ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\align: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/bls                  (178ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\bls: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot                      (144ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/bzimage              (148ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\bzimage: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/ebda                 (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\ebda: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/esxi                 (126ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\esxi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/fit                  (132ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\fit: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/grub                 (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\grub: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/ibft                 (133ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\ibft: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/image                (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\image: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/iso                  (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\iso: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/jsonboot             (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\jsonboot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/kexec                (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\kexec: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/linux                (130ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\linux: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/menu                 (173ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\menu: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/multiboot            (247ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\multiboot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/netboot/ipxe         (162ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\netboot\ipxe: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/netboot/pxe          (215ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\netboot\pxe: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/pez                  (137ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\pez: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/syslinux             (141ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\syslinux: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/systembooter         (144ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\systembooter: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/uefi                 (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\uefi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/universalpayload     (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\universalpayload: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/zbi                  (155ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\zbi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/boot/zimage               (219ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\boot\zimage: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/brctl                     (186ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\brctl: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/cluster/health            (155ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\cluster\health: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/cmdline                   (131ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\cmdline: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/cmos                      (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\cmos: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/cp                        (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\cp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/cpio                      (129ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\cpio: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/crypto                    (175ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\crypto: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/curl                      (128ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\curl: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/dhclient                  (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\dhclient: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/dt                        (123ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\dt: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/efivarfs                  (234ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\efivarfs: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/fdsrv                     (230ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\fdsrv: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/find                      (264ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\find: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/finddrive                 (247ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\finddrive: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/flash/chips               (154ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\flash\chips: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/flash                     (159ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\flash: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/flash/op                  (231ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\flash\op: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/flash/sfdp                (137ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\flash\sfdp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/forth                     (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\forth: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/gpio                      (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\gpio: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/gzip                      (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\gzip: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/hsskey                    (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\hsskey: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ipmi                      (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ipmi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/kmodule                   (113ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\kmodule: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ldd                       (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ldd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/libinit                   (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\libinit: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/liner                     (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\liner: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/logutil                   (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\logutil: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ls                        (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ls: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/lsb                       (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\lsb: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/memio                     (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\memio: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount/block               (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount\block: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount                     (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount/gpt                 (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount\gpt: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount/loop                (123ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount\loop: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount/mtd                 (111ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount\mtd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/mount/scuzz               (111ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\mount\scuzz: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/msr                       (113ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\msr: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/namespace                 (111ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\namespace: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/netcat                    (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\netcat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/netstat                   (133ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\netstat: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ntpdate                   (134ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ntpdate: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/p9dev                     (133ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\p9dev: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/pci                       (123ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\pci: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/progress                  (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\progress: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/pty                       (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\pty: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/rand                      (111ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\rand: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/rtc                       (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\rtc: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/securelaunch              (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\securelaunch: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/securelaunch/launcher     (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\securelaunch\launcher: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/securelaunch/measurement  (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\securelaunch\measurement: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/securelaunch/policy       (124ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\securelaunch\policy: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/securelaunch/tpm          (127ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\securelaunch\tpm: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/shlex                     (120ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\shlex: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/smbios                    (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\smbios: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/spidev                    (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\spidev: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ssh9p                     (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ssh9p: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/sshstream                 (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\sshstream: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/strace                    (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\strace: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/strace/internal/abi       (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\strace\internal\abi: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/strace/internal/binary    (112ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\strace\internal\binary: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/syscallfilter             (112ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\syscallfilter: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/tarutil                   (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\tarutil: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/tc                        (121ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\tc: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/termios                   (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\termios: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/tftp                      (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\tftp: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/traceroute                (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\traceroute: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ts                        (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ts: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/tss                       (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\tss: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/uefivars/boot             (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\uefivars\boot: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/uefivars                  (118ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\uefivars: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/uflag                     (119ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\uflag: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/ulog                      (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\ulog: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/upath                     (203ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\upath: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/uroot/unixflag            (116ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\uroot\unixflag: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/uzip                      (117ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\uzip: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/vfile                     (123ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\vfile: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/vpd                       (122ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\vpd: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/pkg/watchdog                  (125ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\pkg\watchdog: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/tools/testramfs               (114ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\tools\testramfs: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root/tools/vpdbootmanager          (114ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root\tools\vpdbootmanager: exit status 1
+  ❌ FAIL     [wasm/go               ] u-root                               (115ms)
+     ↳ go test -c failed for C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat\u-root: exit status 1
+  ✅ PASS     [wasm/go               ] mohabbat-next/wasm-abi-test          (2.382s)
+--------------------------------------------------------------------------------
+  Total: 157 passed, 2 disabled (sentinel), 255 failed  [Duration: 31m41.806s]
+================================================================================
+exit status 1
+
+C:\Users\mihai\rustic.worktrees\tmp-zip-mohabbat>dd

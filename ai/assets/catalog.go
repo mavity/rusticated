@@ -3,11 +3,32 @@ package assets
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 const modelRepositoryBase = "https://huggingface.co/litert-community"
+const modelFallbackBase = "https://assets.kabi.bi"
+
+func modelAssetURLs(primary string) []string {
+	urls := []string{primary}
+	parsed, err := url.Parse(primary)
+	if err != nil || !strings.EqualFold(parsed.Hostname(), "huggingface.co") {
+		return urls
+	}
+	filename := path.Base(parsed.Path)
+	lowerFilename := strings.ToLower(filename)
+	if !strings.HasPrefix(lowerFilename, "gemma-4-") || !strings.HasSuffix(lowerFilename, ".litertlm") {
+		return urls
+	}
+	return append(urls,
+		modelFallbackBase+"/"+filename,
+		modelFallbackBase+"/gemma4/"+filename,
+	)
+}
 
 // ModelTier describes one supported Gemma 4 LiteRT-LM artifact.
 type ModelTier struct {

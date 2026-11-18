@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,56 @@ type testRoundTripper func(*http.Request) (*http.Response, error)
 
 func (roundTripper testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return roundTripper(req)
+}
+
+func TestDownloadAndValidateFromSourcesFallsBackInOrder(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/primary":
+			http.NotFound(w, r)
+		case "/fallback":
+			_, _ = w.Write([]byte("model-data"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dest := filepath.Join(t.TempDir(), "model.litertlm")
+	err := downloadAndValidateFromSources(
+		context.Background(),
+		[]string{server.URL + "/primary", server.URL + "/fallback"},
+		dest,
+		func(path string) error { return validateSize(path, 1) },
+		FetchOptions{},
+	)
+	if err != nil {
+		t.Fatalf("downloadAndValidateFromSources() error = %v", err)
+	}
+	if got, want := strings.Join(requests, ","), "HEAD /primary,GET /primary,HEAD /fallback,GET /fallback"; got != want {
+		t.Fatalf("requests = %q, want %q", got, want)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "model-data" {
+		t.Fatalf("downloaded file = %q, %v; want model-data", data, err)
+	}
+}
+
+func TestDownloadAndValidateFromSourcesReportsAllFailures(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	err := downloadAndValidateFromSources(
+		context.Background(),
+		[]string{server.URL + "/first", server.URL + "/second"},
+		filepath.Join(t.TempDir(), "model.litertlm"),
+		func(path string) error { return validateSize(path, 1) },
+		FetchOptions{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "/first") || !strings.Contains(err.Error(), "/second") {
+		t.Fatalf("downloadAndValidateFromSources() error = %v, want both source failures", err)
+	}
 }
 
 func TestSelectWheelURLUsesHostCompatibleWheel(t *testing.T) {
