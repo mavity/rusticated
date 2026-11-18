@@ -64,7 +64,8 @@ browser even if a URL/size is retained in the catalog.
 The default local embedder, `embeddinggemma-2-text-270m.litertlm`, is
 164,626,432 bytes. It is included in the single local consent estimate on
 native and browser-local setups, with browser cache state included in the
-estimate.
+estimate. The browser cache check passes only cache status and byte count
+to Go; model contents stay binary and are not transferred by the estimate.
 
 Gemma 4 and EmbeddingGemma prefer Hugging Face; native LiteRT-LM wheels prefer
 PyPI. On failure Kabibi tries the matching filename at `https://assets.kabi.bi/`

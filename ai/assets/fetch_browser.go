@@ -445,7 +445,11 @@ func browserModelDownloadSize(url string, expectedSize int64) (int64, error) {
 	if err := ensureBrowserAssetsBootstrap(); err != nil {
 		return 0, fmt.Errorf("bootstrap browser assets adapter: %w", err)
 	}
-	raw, err := EvalJS(fmt.Sprintf("globalThis.__rustica_assets.checkCached(%s)", strconv.Quote(url)))
+	return estimateBrowserModelDownload(EvalJS, url, expectedSize)
+}
+
+func estimateBrowserModelDownload(eval func(string) (string, error), url string, expectedSize int64) (int64, error) {
+	raw, err := eval(fmt.Sprintf("(async () => JSON.stringify(await globalThis.__rustica_assets.checkCached(%s)))()", strconv.Quote(url)))
 	if err != nil {
 		return 0, fmt.Errorf("check browser model cache: %w", err)
 	}
