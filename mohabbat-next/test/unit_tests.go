@@ -23,7 +23,7 @@ func (r *Runner) RunStage2UnitTests() {
 	})
 
 	palAbi := filepath.Join(r.NextDir, "pal", "abi", "guest.zig")
-	zwasmRoot := filepath.Join(r.NextDir, "runtime", "zwasm", "src", "zwasm.zig")
+	zwasmRoot := filepath.Join(r.BuildDir, "zig", "zwasm-overlay", "src", "zwasm.zig")
 	zwasmOpts := filepath.Join(r.NextDir, "runtime", "src", "build_options.zig")
 
 	// 2. Zig Unit Tests: ABI, Payloads, Unix Brot, PALs, zwasm Runtime

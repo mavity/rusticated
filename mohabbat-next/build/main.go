@@ -125,7 +125,11 @@ func main() {
 
 	darwinStubTbd := filepath.Join(nextDir, "brot", "unix", "darwin-stubs", "libSystem.tbd")
 	palAbiPath := filepath.Join(nextDir, "pal", "abi", "guest.zig")
-	zwasmRootPath := filepath.Join(nextDir, "runtime", "zwasm", "src", "zwasm.zig")
+	zwasmRootPath, err := prepareZwasmOverlay(zigBuildDir, verbose)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error preparing zwasm source overlay: %v\n", err)
+		os.Exit(1)
+	}
 	zwasmOptsPath := filepath.Join(nextDir, "runtime", "src", "build_options.zig")
 	runtimeDir := filepath.Join(nextDir, "runtime")
 
@@ -366,7 +370,11 @@ func main() {
 	var brainWasmPath string
 	if targetName != "" {
 		targetDir := filepath.Join(repoRoot, targetName)
-		overlayPath := filepath.Join(repoRoot, "target", "overlay.json")
+		overlayPath, err := ensureGoBrainOverlay(repoRoot, workDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error preparing Go brain overlay: %v\n", err)
+			os.Exit(1)
+		}
 		brainWasmPath = filepath.Join(componentsDir, targetName+".wasm")
 		fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
 		goCmd := exec.Command("go", "build", "-C", targetDir, "-buildmode=c-shared", "-overlay", overlayPath, "-trimpath", "-ldflags=-s -w", "-o", brainWasmPath, ".")
