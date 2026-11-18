@@ -55,12 +55,12 @@ test "pool lookup and helpers" {
     @memcpy(raw[0..8], "MHBTPOOL");
     std.mem.writeInt(u32, raw[8..12], 1, .little);
     std.mem.writeInt(u32, raw[12..16], 1, .little);
-    @memcpy(raw[16..27], "hello-arm64");
+    @memcpy(raw[16..28], "sample-arm64");
     std.mem.writeInt(u32, raw[16 + 32 ..][0..4], 56, .little);
     std.mem.writeInt(u32, raw[16 + 36 ..][0..4], 5, .little);
     @memcpy(raw[56..61], "abcde");
 
-    try std.testing.expectEqualStrings("abcde", findEntry(&raw, "hello-arm64").?);
+    try std.testing.expectEqualStrings("abcde", findEntry(&raw, "sample-arm64").?);
     try std.testing.expect(findEntry(&raw, "missing") == null);
     try std.testing.expectEqual(@as(?u64, 12345), parseU64("12345"));
     try std.testing.expect(parseU64("12x") == null);

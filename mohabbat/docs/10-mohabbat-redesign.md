@@ -1,5 +1,9 @@
 # Complete Mohabbat Redesign Architecture
 
+> Historical architecture proposal. The built-in hello/file-I/O probes and
+> their targetless executable path described here have been removed. The
+> current Mohabbat Next builder requires a named application guest.
+
 The redesigned Mohabbat transitions from an out-of-process multi-binary extraction orchestrator (which dropped host binaries and spawned `washmhost` child processes) into a **pure in-process, memory-resident, JIT-driven execution engine**.
 
 ---

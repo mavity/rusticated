@@ -25,6 +25,12 @@ func TestZstandardRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildSharedPoolRequiresBrainWasm(t *testing.T) {
+	if _, err := buildSharedPool(AssemblyAssets{}); err == nil {
+		t.Fatal("expected shared pool construction to require an application brain")
+	}
+}
+
 func TestValidatePE(t *testing.T) {
 	// Valid minimal MZ + PE\0\0 header at offset 0x80
 	valid := make([]byte, 256)
@@ -128,12 +134,7 @@ func TestAssembleVegetableBashHandoff(t *testing.T) {
 		PlatformDarwinAarch64:  writeAsset("platform-darwin-aarch64"),
 		RuntimeX86_64:          writeAsset("runtime-x86_64"),
 		RuntimeAarch64:         writeAsset("runtime-aarch64"),
-		HelloX86_64:            writeAsset("hello-x86_64"),
-		HelloAarch64:           writeAsset("hello-aarch64"),
-		FileIoX86_64:           writeAsset("fileio-x86_64"),
-		FileIoAarch64:          writeAsset("fileio-aarch64"),
-		AbiConformanceX86_64:   writeAsset("abi-conformance-x86_64"),
-		AbiConformanceAarch64:  writeAsset("abi-conformance-aarch64"),
+		BrainWasm:              writeAsset("brain.wasm"),
 	}
 
 	templatesDir := filepath.Join(workDir, "templates")

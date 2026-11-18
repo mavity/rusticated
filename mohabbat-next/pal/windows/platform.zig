@@ -779,13 +779,13 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
     s.host = hostPtr().*;
     if (!initKernel32(s)) return 10;
 
-    const payload_ptr = s.host.hello_payload orelse return 11;
-    const payload_len = s.host.hello_payload_size;
-    if (payload_len == 0) return 12;
+    const runtime_ptr = s.host.runtime_slice orelse return 11;
+    const runtime_len = s.host.runtime_slice_size;
+    if (runtime_len == 0 or s.host.wasm_payload == null or s.host.wasm_payload_size == 0) return 12;
 
     const va = s.p_virtual_alloc.?;
     const vp = s.p_virtual_protect.?;
-    const code_aligned = pageAlign(payload_len);
+    const code_aligned = pageAlign(runtime_len);
     const total_size = pal_abi.PREFIX_ABI_OFFSET + code_aligned;
     const mem_base = va(null, total_size, 0x3000, 0x04) orelse return 13; // PAGE_READWRITE
 
@@ -842,10 +842,10 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
     };
 
     const code_ptr = mem_base + pal_abi.PREFIX_ABI_OFFSET;
-    @memcpy(code_ptr[0..payload_len], payload_ptr[0..payload_len]);
+    @memcpy(code_ptr[0..runtime_len], runtime_ptr[0..runtime_len]);
     var old_prot: u32 = 0;
     if (vp(code_ptr, code_aligned, 0x20, &old_prot) == 0) return 14; // PAGE_EXECUTE_READ
-    abiFlushIcache(code_ptr, payload_len);
+    abiFlushIcache(code_ptr, runtime_len);
 
     const RuntimeEntry = *const fn () callconv(win.win_cc) void;
     const entry: RuntimeEntry = @ptrCast(@alignCast(code_ptr));

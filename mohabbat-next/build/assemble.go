@@ -80,16 +80,14 @@ type AssemblyAssets struct {
 	PlatformDarwinAarch64  string
 	RuntimeX86_64          string
 	RuntimeAarch64         string
-	HelloX86_64            string
-	HelloAarch64           string
-	FileIoX86_64           string
-	FileIoAarch64          string
-	AbiConformanceX86_64   string
-	AbiConformanceAarch64  string
 	BrainWasm              string
 }
 
 func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
+	if assets.BrainWasm == "" {
+		return nil, fmt.Errorf("application brain WASM is required")
+	}
+
 	type poolItem struct {
 		name string
 		path string
@@ -103,15 +101,7 @@ func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
 		{name: "platform-darwin-aarch64", path: assets.PlatformDarwinAarch64},
 		{name: "runtime-x86_64", path: assets.RuntimeX86_64},
 		{name: "runtime-aarch64", path: assets.RuntimeAarch64},
-		{name: "hello-x86_64", path: assets.HelloX86_64},
-		{name: "hello-aarch64", path: assets.HelloAarch64},
-		{name: "fileio-x86_64", path: assets.FileIoX86_64},
-		{name: "fileio-aarch64", path: assets.FileIoAarch64},
-		{name: "abi-conformance-x86_64", path: assets.AbiConformanceX86_64},
-		{name: "abi-conformance-aarch64", path: assets.AbiConformanceAarch64},
-	}
-	if assets.BrainWasm != "" {
-		items = append(items, poolItem{name: "brain.wasm", path: assets.BrainWasm})
+		{name: "brain.wasm", path: assets.BrainWasm},
 	}
 
 	const headerSize = 16
@@ -237,7 +227,7 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		return err
 	}
 
-	// 2. Single shared compressed pool blob (all PALs, runtimes, hello/fileio, and optional brain.wasm)
+	// 2. Single shared compressed pool blob (all PALs, runtimes, and the required application brain.wasm)
 	poolCompressed, err := buildSharedPool(assets)
 	if err != nil {
 		return err

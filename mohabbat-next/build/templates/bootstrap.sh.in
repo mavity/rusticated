@@ -27,22 +27,8 @@ case "$SYSTEM" in
 esac
 
 run() {
-    b_off="$1"; b_len="$2"; pool_off="$3"; pool_len="$4"; mode="normal"
+    b_off="$1"; b_len="$2"; pool_off="$3"; pool_len="$4"
     shift 4
-
-    if [ "${1:-}" = "--file-io-test" ]; then
-        [ "$#" -ge 2 ] || { echo "Missing file-I/O test directory." >&2; exit 2; }
-        [ -d "$2" ] || { echo "File-I/O test directory does not exist: $2" >&2; exit 2; }
-        cd -- "$2"
-        mode="fileio"
-        shift 2
-    elif [ "${1:-}" = "--abi-test" ]; then
-        [ "$#" -ge 3 ] || { echo "Missing ABI test directory or suite." >&2; exit 2; }
-        [ -d "$2" ] || { echo "ABI test directory does not exist: $2" >&2; exit 2; }
-        cd -- "$2"
-        mode="abi"
-        shift 2
-    fi
 
     tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"
     tmp_dir="${tmp_dir:-/tmp}"
@@ -55,7 +41,7 @@ run() {
     tail -c "+$((b_off + 1))" "$ME" | head -c "$b_len" > "$tmp_exe"
     [ -s "$tmp_exe" ] || { echo "brot: failed to extract launcher into $tmp_exe from $ME" >&2; exit 3; }
     chmod 700 "$tmp_exe"
-    exec "$tmp_exe" "$ME" "$pool_off" "$pool_len" "$mode" "$@"
+    exec "$tmp_exe" "$ME" "$pool_off" "$pool_len" "$@"
 }
 
 case "$SYSTEM/$ARCH" in

@@ -8,14 +8,14 @@ const decompress = @import("decompress.zig");
 const PREFIX_ABI_OFFSET: usize = 0x20000;
 
 pub const UnixPlatformHost = extern struct {
-    hello_payload: [*]const u8,
-    hello_payload_size: usize,
+    runtime_slice: [*]const u8,
+    runtime_slice_size: usize,
     argv: [*]const [*:0]const u8,
     argc: usize,
     envp: [*]const [*:0]const u8,
     envc: usize,
     pid: u32,
-    wasm_bytes: ?[*]const u8,
+    wasm_bytes: [*]const u8,
     wasm_len: usize,
 };
 
@@ -77,43 +77,12 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
         }
     }
     const base_idx = match_idx orelse die("brot: argv demarcation failed\n", 11);
-    if (base_idx + 4 >= argv.len) die("brot: missing bundle arguments\n", 12);
+    if (base_idx + 3 >= argv.len) die("brot: missing bundle arguments\n", 12);
 
     const me_path_z = argv[base_idx + 1];
     const pool_off = pool.parseU64(cstrSlice(argv[base_idx + 2])) orelse die("brot: bad pool_off\n", 13);
     const pool_len_u64 = pool.parseU64(cstrSlice(argv[base_idx + 3])) orelse die("brot: bad pool_len\n", 14);
-    const mode = cstrSlice(argv[base_idx + 4]);
-    var user_argv = argv[base_idx + 5 ..];
-
-    var override_wasm: ?[]const u8 = null;
-    if (user_argv.len >= 2 and std.mem.eql(u8, cstrSlice(user_argv[0]), "--wasm")) {
-        const wpath_z = user_argv[1];
-        const wfd_res = linux.openat(linux.AT.FDCWD, wpath_z, .{}, 0);
-        const wfd_signed: isize = @bitCast(wfd_res);
-        if (wfd_signed < 0) die("brot: open --wasm file failed\n", 24);
-        const wfd: i32 = @intCast(wfd_signed);
-        const wsize_res = linux.lseek(wfd, 0, linux.SEEK.END);
-        const wsize_signed: isize = @bitCast(wsize_res);
-        if (wsize_signed <= 0 or wsize_signed > 128 * 1024 * 1024) die("brot: invalid --wasm size\n", 25);
-        _ = linux.lseek(wfd, 0, linux.SEEK.SET);
-        const wlen: usize = @intCast(wsize_signed);
-        const wbuf = allocator.alloc(u8, wlen) catch die("brot: alloc --wasm failed\n", 26);
-        var wread: usize = 0;
-        while (wread < wlen) {
-            const r_res = linux.read(wfd, wbuf.ptr + wread, wlen - wread);
-            const r_signed: isize = @bitCast(r_res);
-            if (r_signed <= 0) die("brot: read --wasm failed\n", 27);
-            wread += @intCast(r_signed);
-        }
-        _ = linux.close(wfd);
-        override_wasm = wbuf;
-        if (user_argv.len >= 3 and std.mem.eql(u8, cstrSlice(user_argv[2]), "--")) {
-            user_argv = user_argv[2..]; // keep argv[0] slot (overwritten or skipped) -> shift past "--"
-            user_argv = argv[base_idx + 7 ..];
-        } else {
-            user_argv = user_argv[1..];
-        }
-    }
+    const user_argv = argv[base_idx + 4 ..];
 
     if (pool_len_u64 == 0 or pool_len_u64 > 128 * 1024 * 1024) die("brot: invalid pool_len\n", 15);
     const pool_len: usize = @intCast(pool_len_u64);
@@ -140,26 +109,11 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
     const raw_pool = decompress.decompressZstd(allocator, comp_buf) catch die("brot: zstd decompress failed\n", 20);
     allocator.free(comp_buf);
 
-    const arch_str = switch (builtin.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        else => @compileError("Unsupported arch"),
-    };
     const pal_name = if (builtin.cpu.arch == .x86_64) "platform-linux-x86_64" else "platform-linux-aarch64";
     const pal_slice = pool.findEntry(raw_pool, pal_name) orelse die("brot: PAL not found in pool\n", 21);
-
-    const wasm_slice = override_wasm orelse pool.findEntry(raw_pool, "brain.wasm");
-    const payload_name = if (wasm_slice != null)
-        (if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64")
-    else if (std.mem.eql(u8, mode, "fileio"))
-        (if (builtin.cpu.arch == .x86_64) "fileio-x86_64" else "fileio-aarch64")
-    else if (std.mem.eql(u8, mode, "abi"))
-        (if (builtin.cpu.arch == .x86_64) "abi-conformance-x86_64" else "abi-conformance-aarch64")
-    else
-        (if (builtin.cpu.arch == .x86_64) "hello-x86_64" else "hello-aarch64");
-    _ = arch_str;
-
-    const payload_slice = pool.findEntry(raw_pool, payload_name) orelse die("brot: payload not found in pool\n", 22);
+    const runtime_name = if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64";
+    const runtime_slice = pool.findEntry(raw_pool, runtime_name) orelse die("brot: runtime not found in pool\n", 22);
+    const wasm_slice = pool.findEntry(raw_pool, "brain.wasm") orelse die("brot: application brain not found in pool\n", 28);
 
     const code_aligned = (pal_slice.len + 4095) & ~@as(usize, 4095);
     const total_map = PREFIX_ABI_OFFSET + code_aligned;
@@ -171,15 +125,15 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
     const host: *UnixPlatformHost = @ptrCast(@alignCast(pal_base));
     const pid_res = linux.getpid();
     host.* = .{
-        .hello_payload = payload_slice.ptr,
-        .hello_payload_size = payload_slice.len,
+        .runtime_slice = runtime_slice.ptr,
+        .runtime_slice_size = runtime_slice.len,
         .argv = user_argv.ptr,
         .argc = user_argv.len,
         .envp = envp.ptr,
         .envc = envp.len,
         .pid = @intCast(pid_res),
-        .wasm_bytes = if (wasm_slice) |w| w.ptr else null,
-        .wasm_len = if (wasm_slice) |w| w.len else 0,
+        .wasm_bytes = wasm_slice.ptr,
+        .wasm_len = wasm_slice.len,
     };
 
     const code_ptr = pal_base + PREFIX_ABI_OFFSET;

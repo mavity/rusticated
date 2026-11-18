@@ -29,11 +29,11 @@ pub const UnixPlatformHost = extern struct {
     free: *const fn (?*anyopaque, usize) callconv(.c) void,
     flush_cache: *const fn (?*anyopaque, usize) callconv(.c) void,
     set_jit_write_protect: *const fn (c_int) callconv(.c) void,
-    hello_payload: [*]const u8,
-    hello_payload_size: usize,
+    runtime_slice: [*]const u8,
+    runtime_slice_size: usize,
     argv: [*]const [*:0]const u8,
     argc: usize,
-    wasm_bytes: ?[*]const u8,
+    wasm_bytes: [*]const u8,
     wasm_len: usize,
 };
 
@@ -94,38 +94,12 @@ pub fn runMain(argv: []const [*:0]const u8) noreturn {
         }
     }
     const base_idx = match_idx orelse die("brot: argv demarcation failed\n", 11);
-    if (base_idx + 4 >= argv.len) die("brot: missing bundle arguments\n", 12);
+    if (base_idx + 3 >= argv.len) die("brot: missing bundle arguments\n", 12);
 
     const me_path_z = argv[base_idx + 1];
     const pool_off = pool.parseU64(cstrSlice(argv[base_idx + 2])) orelse die("brot: bad pool_off\n", 13);
     const pool_len_u64 = pool.parseU64(cstrSlice(argv[base_idx + 3])) orelse die("brot: bad pool_len\n", 14);
-    const mode = cstrSlice(argv[base_idx + 4]);
-    var user_argv = argv[base_idx + 5 ..];
-
-    var override_wasm: ?[]const u8 = null;
-    if (user_argv.len >= 2 and std.mem.eql(u8, cstrSlice(user_argv[0]), "--wasm")) {
-        const wpath_z = user_argv[1];
-        const wfd = open(wpath_z, 0, 0);
-        if (wfd < 0) die("brot: open --wasm file failed\n", 24);
-        const wsize = lseek(wfd, 0, 2);
-        if (wsize <= 0 or wsize > 128 * 1024 * 1024) die("brot: invalid --wasm size\n", 25);
-        _ = lseek(wfd, 0, 0);
-        const wlen: usize = @intCast(wsize);
-        const wbuf = allocator.alloc(u8, wlen) catch die("brot: alloc --wasm failed\n", 26);
-        var wread: usize = 0;
-        while (wread < wlen) {
-            const r = read(wfd, wbuf.ptr + wread, wlen - wread);
-            if (r <= 0) die("brot: read --wasm failed\n", 27);
-            wread += @intCast(r);
-        }
-        _ = close(wfd);
-        override_wasm = wbuf;
-        if (user_argv.len >= 3 and std.mem.eql(u8, cstrSlice(user_argv[2]), "--")) {
-            user_argv = argv[base_idx + 7 ..];
-        } else {
-            user_argv = user_argv[1..];
-        }
-    }
+    const user_argv = argv[base_idx + 4 ..];
 
     if (pool_len_u64 == 0 or pool_len_u64 > 128 * 1024 * 1024) die("brot: invalid pool_len\n", 15);
     const pool_len: usize = @intCast(pool_len_u64);
@@ -149,16 +123,9 @@ pub fn runMain(argv: []const [*:0]const u8) noreturn {
     const pal_name = if (builtin.cpu.arch == .x86_64) "platform-darwin-x86_64" else "platform-darwin-aarch64";
     const pal_slice = pool.findEntry(raw_pool, pal_name) orelse die("brot: PAL not found in pool\n", 21);
 
-    const wasm_slice = override_wasm orelse pool.findEntry(raw_pool, "brain.wasm");
-    const payload_name = if (wasm_slice != null)
-        (if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64")
-    else if (std.mem.eql(u8, mode, "fileio"))
-        (if (builtin.cpu.arch == .x86_64) "fileio-x86_64" else "fileio-aarch64")
-    else if (std.mem.eql(u8, mode, "abi"))
-        (if (builtin.cpu.arch == .x86_64) "abi-conformance-x86_64" else "abi-conformance-aarch64")
-    else
-        (if (builtin.cpu.arch == .x86_64) "hello-x86_64" else "hello-aarch64");
-    const payload_slice = pool.findEntry(raw_pool, payload_name) orelse die("brot: payload not found in pool\n", 22);
+    const runtime_name = if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64";
+    const runtime_slice = pool.findEntry(raw_pool, runtime_name) orelse die("brot: runtime not found in pool\n", 22);
+    const wasm_slice = pool.findEntry(raw_pool, "brain.wasm") orelse die("brot: application brain not found in pool\n", 28);
 
     const prefix_raw = mmap(null, PREFIX_ABI_OFFSET, 0x3, 0x1002, -1, 0);
     if (prefix_raw == null or @intFromPtr(prefix_raw) == std.math.maxInt(usize)) die("brot: mmap prefix failed\n", 23);
@@ -181,12 +148,12 @@ pub fn runMain(argv: []const [*:0]const u8) noreturn {
         .free = freeCb,
         .flush_cache = flushCb,
         .set_jit_write_protect = jitProtectCb,
-        .hello_payload = payload_slice.ptr,
-        .hello_payload_size = payload_slice.len,
+        .runtime_slice = runtime_slice.ptr,
+        .runtime_slice_size = runtime_slice.len,
         .argv = user_argv.ptr,
         .argc = user_argv.len,
-        .wasm_bytes = if (wasm_slice) |w| w.ptr else null,
-        .wasm_len = if (wasm_slice) |w| w.len else 0,
+        .wasm_bytes = wasm_slice.ptr,
+        .wasm_len = wasm_slice.len,
     };
     const code_ptr = pal_base + PREFIX_ABI_OFFSET;
     @memcpy(code_ptr[0..pal_slice.len], pal_slice);

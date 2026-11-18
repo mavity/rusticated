@@ -4,8 +4,8 @@ const pal_abi = @import("pal_abi");
 const sys = @import("linux_sys.zig");
 
 const UnixPlatformHost = extern struct {
-    hello_payload: [*]const u8,
-    hello_payload_size: usize,
+    runtime_slice: [*]const u8,
+    runtime_slice_size: usize,
     argv: [*]const [*:0]const u8,
     argc: usize,
     envp: [*]const [*:0]const u8,
@@ -1410,11 +1410,11 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     s.* = .{};
     s.host = hostPtr().*;
 
-    const payload_ptr = s.host.hello_payload;
-    const payload_len = s.host.hello_payload_size;
-    if (payload_len == 0) return 12;
+    const runtime_ptr = s.host.runtime_slice;
+    const runtime_len = s.host.runtime_slice_size;
+    if (runtime_len == 0 or s.host.wasm_bytes == null or s.host.wasm_len == 0) return 12;
 
-    const code_aligned = pageAlign(payload_len);
+    const code_aligned = pageAlign(runtime_len);
     const total_size = pal_abi.PREFIX_ABI_OFFSET + code_aligned;
     const mem_res = sys.sys6(sys.NR.mmap, 0, total_size, sys.PROT_READ | sys.PROT_WRITE, sys.MAP_PRIVATE | sys.MAP_ANONYMOUS, @bitCast(@as(isize, -1)), 0);
     if (sys.isErr(mem_res) != null) return 13;
@@ -1473,9 +1473,9 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     };
 
     const code_ptr = mem_base + pal_abi.PREFIX_ABI_OFFSET;
-    @memcpy(code_ptr[0..payload_len], payload_ptr[0..payload_len]);
+    @memcpy(code_ptr[0..runtime_len], runtime_ptr[0..runtime_len]);
     _ = sys.sys3(sys.NR.mprotect, @intFromPtr(code_ptr), code_aligned, sys.PROT_READ | sys.PROT_EXEC);
-    abiFlushIcache(code_ptr, payload_len);
+    abiFlushIcache(code_ptr, runtime_len);
 
     const RuntimeEntry = *const fn () callconv(pal_abi.pal_cc) void;
     const entry: RuntimeEntry = @ptrCast(@alignCast(code_ptr));

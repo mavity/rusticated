@@ -71,18 +71,18 @@ func ensureZstdSharpDll(windowsHostDir, workDir string, verbose bool) (string, e
 		return "", err
 	}
 
-	packerProj := filepath.Join(windowsHostDir, "PackComponents.csproj")
-	packerBin := filepath.Join(workDir, "packer", "bin")
-	packerObj := filepath.Join(workDir, "packer", "obj")
+	dependencyProj := filepath.Join(windowsHostDir, "ZstdSharpDependency.csproj")
+	dependencyBin := filepath.Join(workDir, "zstdsharp", "bin")
+	dependencyObj := filepath.Join(workDir, "zstdsharp", "obj")
 
-	projArg := packerProj
-	baseOutArg := filepath.ToSlash(packerBin) + "/"
-	baseIntArg := filepath.ToSlash(packerObj) + "/"
+	projArg := dependencyProj
+	baseOutArg := filepath.ToSlash(dependencyBin) + "/"
+	baseIntArg := filepath.ToSlash(dependencyObj) + "/"
 
 	if strings.HasSuffix(dotnetCmd, ".exe") && runtime.GOOS != "windows" {
-		projArg = toWindowsPath(packerProj)
-		baseOutArg = toWindowsPath(packerBin) + `\`
-		baseIntArg = toWindowsPath(packerObj) + `\`
+		projArg = toWindowsPath(dependencyProj)
+		baseOutArg = toWindowsPath(dependencyBin) + `\`
+		baseIntArg = toWindowsPath(dependencyObj) + `\`
 	}
 
 	cmd := exec.Command(dotnetCmd, "build", projArg, "-c", "Release", "--nologo",
@@ -94,15 +94,15 @@ func ensureZstdSharpDll(windowsHostDir, workDir string, verbose bool) (string, e
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("dotnet build PackComponents.csproj: %w", err)
+			return "", fmt.Errorf("dotnet build ZstdSharpDependency.csproj: %w", err)
 		}
 	} else {
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("dotnet build PackComponents.csproj: %w\n%s", err, string(out))
+			return "", fmt.Errorf("dotnet build ZstdSharpDependency.csproj: %w\n%s", err, string(out))
 		}
 	}
 
-	net462Dir := filepath.Join(packerBin, "Release", "net462")
+	net462Dir := filepath.Join(dependencyBin, "Release", "net462")
 	dllPath := filepath.Join(net462Dir, "ZstdSharp.dll")
 	if _, err := os.Stat(dllPath); err != nil {
 		return "", fmt.Errorf("expected ZstdSharp.dll at %s: %w", dllPath, err)
@@ -110,12 +110,7 @@ func ensureZstdSharpDll(windowsHostDir, workDir string, verbose bool) (string, e
 	return net462Dir, nil
 }
 
-type WindowsComponentResource struct {
-	FilePath     string
-	ResourceName string
-}
-
-func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, components []WindowsComponentResource, verbose bool) error {
+func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, verbose bool) error {
 	compiler, err := findWindowsCompiler()
 	if err != nil {
 		return err
@@ -167,7 +162,7 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 		"/reference:System.dll",
 	}
 
-	// Add references and embedded resources from dependencies (ZstdSharp.dll, etc.)
+	// Embed the managed dependencies so the host remains self-contained.
 	entries, err := os.ReadDir(depsDir)
 	if err != nil {
 		return fmt.Errorf("read deps dir %s: %w", depsDir, err)
@@ -190,15 +185,6 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 	}
 	if dllCount == 0 {
 		return fmt.Errorf("no managed runtime dependencies found in %s", depsDir)
-	}
-
-	// Add the compressed platform and payload components.
-	for _, comp := range components {
-		compPath := comp.FilePath
-		if isWindowsBinary {
-			compPath = toWindowsPath(comp.FilePath)
-		}
-		args = append(args, fmt.Sprintf("/resource:%s,%s", compPath, comp.ResourceName))
 	}
 
 	args = append(args, targetProgramCs)

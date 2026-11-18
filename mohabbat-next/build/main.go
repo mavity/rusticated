@@ -59,16 +59,14 @@ func checkTools() error {
 
 func main() {
 	var (
-		verbose         bool
-		outputPath      string
-		windowsHostOnly bool
+		verbose    bool
+		outputPath string
 	)
 
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose build output")
-	flag.StringVar(&outputPath, "o", "", "Output executable path (defaults to release/dist/MohabbatNext.exe)")
+	flag.StringVar(&outputPath, "o", "", "Output executable path")
 	flag.StringVar(&outputPath, "out", "", "Output executable path")
-	flag.BoolVar(&windowsHostOnly, "windows-host-only", false, "Build only the Windows CLR test host")
 	flag.Parse()
 
 	totalStart := time.Now()
@@ -83,16 +81,13 @@ func main() {
 	}
 
 	repoRoot := filepath.Dir(nextDir)
-	targetName := ""
-	if flag.NArg() > 0 {
-		targetName = strings.TrimSpace(flag.Arg(0))
+	if flag.NArg() != 1 || strings.TrimSpace(flag.Arg(0)) == "" {
+		fmt.Fprintln(os.Stderr, "Error: an application target is required (usage: build [flags] <target>)")
+		os.Exit(2)
 	}
+	targetName := strings.TrimSpace(flag.Arg(0))
 	if outputPath == "" {
-		if targetName != "" {
-			outputPath = filepath.Join(repoRoot, "release", "dist", targetName+".exe")
-		} else {
-			outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatNext.exe")
-		}
+		outputPath = filepath.Join(repoRoot, "release", "dist", targetName+".exe")
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -121,6 +116,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	brainWasmPath := filepath.Join(componentsDir, targetName+".wasm")
+	targetDir := filepath.Join(repoRoot, targetName)
+	fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
+	if err := mohabbat.BuildGoBrainWasm(repoRoot, targetDir, brainWasmPath, verbose); err != nil {
+		fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n", targetName, err)
+		os.Exit(1)
+	}
+
 	// Step 2: Build Zig flat components and Brot micro-launchers in parallel
 	fmt.Println("🍆  [2/5] Compiling Zig flat components and Unix Brot launchers in parallel...")
 
@@ -142,73 +145,6 @@ func main() {
 	}
 
 	flatDefs := []ZigFlatConfig{
-		// Hello payload
-		{
-			Name:         "payload-x86_64",
-			RootFile:     filepath.Join(nextDir, "payload", "hello.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "x86_64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      16 * 1024,
-			OutFileName:  "hello-x86_64",
-		},
-		{
-			Name:         "payload-aarch64",
-			RootFile:     filepath.Join(nextDir, "payload", "hello.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "aarch64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      16 * 1024,
-			OutFileName:  "hello-aarch64",
-		},
-		{
-			Name:         "payload-fileio-x86_64",
-			RootFile:     filepath.Join(nextDir, "payload", "fileio.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "x86_64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      64 * 1024,
-			OutFileName:  "hello-fileio-x86_64",
-		},
-		{
-			Name:         "payload-fileio-aarch64",
-			RootFile:     filepath.Join(nextDir, "payload", "fileio.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "aarch64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      64 * 1024,
-			OutFileName:  "hello-fileio-aarch64",
-		},
-		{
-			Name:         "payload-abi-x86_64",
-			RootFile:     filepath.Join(nextDir, "payload", "abi_conformance.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "x86_64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      64 * 1024,
-			OutFileName:  "abi-conformance-x86_64",
-		},
-		{
-			Name:         "payload-abi-aarch64",
-			RootFile:     filepath.Join(nextDir, "payload", "abi_conformance.zig"),
-			Deps:         []ZigDep{palAbiDep},
-			Arch:         "aarch64",
-			Optimize:     "ReleaseSmall",
-			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
-			EntrySymbol:  "hello_payload_code_start",
-			MaxSize:      64 * 1024,
-			OutFileName:  "abi-conformance-aarch64",
-		},
 		// Movable zwasm Runtime Slice (ISA-shared)
 		{
 			Name:         "runtime-x86_64",
@@ -357,15 +293,6 @@ func main() {
 			}
 			builtBins[def.OutFileName] = binPath
 
-			if strings.HasPrefix(def.OutFileName, "platform-linux") ||
-				strings.HasPrefix(def.OutFileName, "platform-darwin") ||
-				strings.HasPrefix(def.OutFileName, "hello-") {
-				dest := filepath.Join(unixOutDir, def.OutFileName+".bin")
-				data, err := os.ReadFile(binPath)
-				if err == nil {
-					_ = os.WriteFile(dest, data, 0o644)
-				}
-			}
 		}(def)
 	}
 
@@ -390,38 +317,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	var brainWasmPath string
-	if targetName != "" {
-		targetDir := filepath.Join(repoRoot, targetName)
-		brainWasmPath = filepath.Join(componentsDir, targetName+".wasm")
-		fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
-		if err := mohabbat.BuildGoBrainWasm(repoRoot, targetDir, brainWasmPath, verbose); err != nil {
-			fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n", targetName, err)
-			os.Exit(1)
-		}
-	}
-
 	// Step 3: Windows CLR host embeds only ZstdSharp; all native/WASM components live in the shared compressed pool.
 	fmt.Println("🍆  [3/5] Preparing Windows CLR Host (shared compressed pool will be appended)...")
-	var winResources []WindowsComponentResource
 
 	// Step 4: Build Windows AnyCPU CLR Host
 	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
 	windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
-	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, "anycpu", winResources, verbose); err != nil {
+	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, "anycpu", verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
 		os.Exit(1)
-	}
-
-	windowsHostX64Exe := filepath.Join(workDir, "MohabbatWindowsHost-x64.exe")
-	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostX64Exe, "x64", winResources, verbose); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building x64 Windows host: %v\n", err)
-		os.Exit(1)
-	}
-
-	if windowsHostOnly {
-		fmt.Printf("🍆  Finished. Windows-only test host: %s\n", windowsHostExe)
-		return
 	}
 
 	// Step 5: Vegetable Assembly
@@ -459,12 +363,6 @@ func main() {
 		PlatformDarwinAarch64:  builtBins["platform-darwin-aarch64"],
 		RuntimeX86_64:          builtBins["runtime-x86_64"],
 		RuntimeAarch64:         builtBins["runtime-aarch64"],
-		HelloX86_64:            builtBins["hello-x86_64"],
-		HelloAarch64:           builtBins["hello-aarch64"],
-		FileIoX86_64:           builtBins["hello-fileio-x86_64"],
-		FileIoAarch64:          builtBins["hello-fileio-aarch64"],
-		AbiConformanceX86_64:   builtBins["abi-conformance-x86_64"],
-		AbiConformanceAarch64:  builtBins["abi-conformance-aarch64"],
 		BrainWasm:              brainWasmPath,
 	}
 
@@ -472,15 +370,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error during vegetable assembly: %v\n", err)
 		os.Exit(1)
 	}
-	if err := assembleVegetable(windowsHostX64Exe, assemblyAssets, templatesDir, windowsHostX64Exe+".tmp"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error assembling x64 host vegetable: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.Rename(windowsHostX64Exe+".tmp", windowsHostX64Exe); err != nil {
-		fmt.Fprintf(os.Stderr, "Error replacing x64 host vegetable: %v\n", err)
-		os.Exit(1)
-	}
-
 	outputBytes, err := os.ReadFile(outputPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading assembled output: %v\n", err)

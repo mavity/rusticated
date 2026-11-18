@@ -9,8 +9,8 @@ const UnixPlatformHost = extern struct {
     free: ?*const fn (?*anyopaque, usize) callconv(.c) void,
     flush_cache: ?*const fn (?*anyopaque, usize) callconv(.c) void,
     set_jit_write_protect: ?*const fn (c_int) callconv(.c) void,
-    hello_payload: [*]const u8,
-    hello_payload_size: usize,
+    runtime_slice: [*]const u8,
+    runtime_slice_size: usize,
     argv: [*]const [*:0]const u8,
     argc: usize,
     wasm_bytes: ?[*]const u8,
@@ -738,12 +738,12 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     s.p_exit = @ptrCast(@alignCast(sym(s, "exit") orelse return 12));
     s.p_errno = @ptrCast(@alignCast(sym(s, "__error") orelse return 12));
 
-    const payload_len = s.host.hello_payload_size;
-    if (payload_len == 0) return 13;
+    const runtime_len = s.host.runtime_slice_size;
+    if (runtime_len == 0 or s.host.wasm_bytes == null or s.host.wasm_len == 0) return 13;
 
     const alloc = s.host.alloc orelse return 14;
     if (s.host.set_jit_write_protect) |jp| jp(0);
-    const mem_raw = alloc(pal_abi.PREFIX_ABI_OFFSET + payload_len) orelse return 15;
+    const mem_raw = alloc(pal_abi.PREFIX_ABI_OFFSET + runtime_len) orelse return 15;
     const mem_base: [*]u8 = @ptrCast(mem_raw);
 
     const table: *pal_abi.PalAbiTable = @ptrCast(@alignCast(mem_base));
@@ -799,9 +799,9 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     };
 
     const code_ptr = mem_base + pal_abi.PREFIX_ABI_OFFSET;
-    @memcpy(code_ptr[0..payload_len], s.host.hello_payload[0..payload_len]);
+    @memcpy(code_ptr[0..runtime_len], s.host.runtime_slice[0..runtime_len]);
     if (s.host.set_jit_write_protect) |jp| jp(1);
-    if (s.host.flush_cache) |fc| fc(code_ptr, payload_len);
+    if (s.host.flush_cache) |fc| fc(code_ptr, runtime_len);
 
     const RuntimeEntry = *const fn () callconv(pal_abi.pal_cc) void;
     const entry: RuntimeEntry = @ptrCast(@alignCast(code_ptr));
