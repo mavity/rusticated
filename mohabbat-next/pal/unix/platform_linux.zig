@@ -31,6 +31,8 @@ const OpKind = enum(u8) {
     none = 0,
     read_fd = 1,
     timer = 2,
+    accept = 3,
+    wait_proc = 4,
 };
 
 const PendingOp = struct {
@@ -38,6 +40,7 @@ const PendingOp = struct {
     kind: OpKind = .none,
     guest_ov: ?*pal_abi.Overlapped = null,
     fd: i32 = -1,
+    pid: i32 = -1,
     buf: ?[*]u8 = null,
     len: usize = 0,
     deadline_ns: u64 = 0,
@@ -284,6 +287,15 @@ fn abiGetPlatformInfoFull(out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) u32 {
     copyFixed(&info.rusticated_name, "rusticated");
     copyFixed(&info.build_platform, if (builtin.cpu.arch == .x86_64) "linux-amd64" else "linux-arm64");
     copyFixed(&info.temp_dir, "/tmp");
+    const s = statePtr();
+    for (0..s.host.envc) |i| {
+        const entry = std.mem.sliceTo(s.host.envp[i], 0);
+        if (std.mem.startsWith(u8, entry, "HOME=")) {
+            copyFixed(&info.user_home_dir, entry[5..]);
+        } else if (std.mem.startsWith(u8, entry, "TMPDIR=")) {
+            copyFixed(&info.temp_dir, entry[7..]);
+        }
+    }
     const bytes = std.mem.asBytes(&info);
     @memcpy(out[0..bytes.len], bytes);
     return 0;
@@ -629,7 +641,7 @@ fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: 
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    const at_flags: u32 = if ((flags & pal_abi.PATH_REMOVE_FLAG_DIR) != 0) sys.AT_REMOVEDIR else 0;
+    const at_flags: u32 = if ((flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0) sys.AT_REMOVEDIR else 0;
     const res = sys.sys3(sys.NR.unlinkat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), at_flags);
     if (sys.isErr(res)) |e| {
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
@@ -672,21 +684,519 @@ fn abiPathRename(ov: *pal_abi.Overlapped, old_p: [*]const u8, o_len: usize, new_
     completeInline(ov, 0, 0, 0);
 }
 
-fn abiNetOpen(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: u32, _: u32) callconv(pal_abi.pal_cc) void {
-    completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+fn parseIpv4(addr: []const u8) ?[4]u8 {
+    var out: [4]u8 = undefined;
+    var part: usize = 0;
+    var val: u32 = 0;
+    var has_digit = false;
+    for (addr) |b| {
+        if (b == '.') {
+            if (!has_digit or part >= 3 or val > 255) return null;
+            out[part] = @intCast(val);
+            part += 1;
+            val = 0;
+            has_digit = false;
+        } else if (b >= '0' and b <= '9') {
+            val = val * 10 + (b - '0');
+            if (val > 255) return null;
+            has_digit = true;
+        } else {
+            return null;
+        }
+    }
+    if (!has_digit or part != 3) return null;
+    out[3] = @intCast(val);
+    return out;
 }
-fn abiNetAccept(ov: *pal_abi.Overlapped, _: u64) callconv(pal_abi.pal_cc) void {
-    completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+
+fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, port: u32, flags: u32) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const sock_res = sys.sys3(sys.NR.socket, 2, 1 | 0o2000000, 6); // AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP
+    if (sys.isErr(sock_res)) |e| {
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
+    }
+    const fd: i32 = @intCast(sock_res);
+
+    const ip = if (addr_len == 0) [4]u8{ 0, 0, 0, 0 } else (parseIpv4(addr_ptr[0..addr_len]) orelse {
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    });
+    var sa: sys.SockAddrIn = .{
+        .family = 2,
+        .port_be = std.mem.nativeToBig(u16, @intCast(port & 0xffff)),
+        .addr = ip,
+    };
+
+    const listen_mode = (flags & 1) == 0;
+    if (listen_mode) {
+        const one: i32 = 1;
+        _ = sys.sys6(sys.NR.setsockopt, @intCast(fd), 1, 2, @intFromPtr(&one), @sizeOf(i32), 0); // SOL_SOCKET=1, SO_REUSEADDR=2
+        const bind_res = sys.sys3(sys.NR.bind, @intCast(fd), @intFromPtr(&sa), @sizeOf(sys.SockAddrIn));
+        if (sys.isErr(bind_res)) |e| {
+            _ = sys.sys1(sys.NR.close, @intCast(fd));
+            completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+            return;
+        }
+        const listen_res = sys.sys2(sys.NR.listen, @intCast(fd), 128);
+        if (sys.isErr(listen_res)) |e| {
+            _ = sys.sys1(sys.NR.close, @intCast(fd));
+            completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+            return;
+        }
+        var eff_port: u64 = port;
+        var slen: u32 = @sizeOf(sys.SockAddrIn);
+        if (sys.isErr(sys.sys3(sys.NR.getsockname, @intCast(fd), @intFromPtr(&sa), @intFromPtr(&slen))) == null) {
+            eff_port = std.mem.bigToNative(u16, sa.port_be);
+        }
+        // Set O_NONBLOCK for accept polling
+        const fl = sys.sys3(sys.NR.fcntl, @intCast(fd), 3, 0);
+        if (sys.isErr(fl) == null) {
+            _ = sys.sys3(sys.NR.fcntl, @intCast(fd), 4, fl | sys.O_NONBLOCK);
+        }
+        const he = allocHandle(s) orelse {
+            _ = sys.sys1(sys.NR.close, @intCast(fd));
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        he.fd = fd;
+        he.is_socket = true;
+        completeInline(ov, 0, eff_port, he.token);
+        return;
+    }
+
+    const conn_res = sys.sys3(sys.NR.connect, @intCast(fd), @intFromPtr(&sa), @sizeOf(sys.SockAddrIn));
+    if (sys.isErr(conn_res)) |e| {
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
+    }
+    const fl = sys.sys3(sys.NR.fcntl, @intCast(fd), 3, 0);
+    if (sys.isErr(fl) == null) {
+        _ = sys.sys3(sys.NR.fcntl, @intCast(fd), 4, fl | sys.O_NONBLOCK);
+    }
+    const he = allocHandle(s) orelse {
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    he.fd = fd;
+    he.is_socket = true;
+    completeInline(ov, 0, port, he.token);
 }
-fn abiNetLookup(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: [*]u8, _: usize) callconv(pal_abi.pal_cc) void {
-    completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+
+fn abiNetAccept(ov: *pal_abi.Overlapped, listener: u64) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const he = findHandle(s, listener) orelse {
+        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
+        return;
+    };
+    if (!he.is_socket) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const res = sys.sys3(sys.NR.accept, @intCast(he.fd), 0, 0);
+    if (sys.isErr(res)) |e| {
+        if (e == 11) { // EAGAIN
+            const op = allocOp(s) orelse {
+                completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                return;
+            };
+            op.kind = .accept;
+            op.guest_ov = ov;
+            op.fd = he.fd;
+            return;
+        }
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
+    }
+    const cli_fd: i32 = @intCast(res);
+    const fl = sys.sys3(sys.NR.fcntl, @intCast(cli_fd), 3, 0);
+    if (sys.isErr(fl) == null) {
+        _ = sys.sys3(sys.NR.fcntl, @intCast(cli_fd), 4, fl | sys.O_NONBLOCK);
+    }
+    const cli_he = allocHandle(s) orelse {
+        _ = sys.sys1(sys.NR.close, @intCast(cli_fd));
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    cli_he.fd = cli_fd;
+    cli_he.is_socket = true;
+    completeInline(ov, 0, 0, cli_he.token);
+}
+
+fn writeDnsQname(out: []u8, name: []const u8) ?usize {
+    var pos: usize = 0;
+    var start: usize = 0;
+    for (name, 0..) |b, i| {
+        if (b == '.') {
+            const seg = i - start;
+            if (seg == 0 or seg > 63 or pos + 1 + seg >= out.len) return null;
+            out[pos] = @intCast(seg);
+            pos += 1;
+            @memcpy(out[pos..][0..seg], name[start..i]);
+            pos += seg;
+            start = i + 1;
+        }
+    }
+    if (start < name.len) {
+        const seg = name.len - start;
+        if (seg > 63 or pos + 1 + seg >= out.len) return null;
+        out[pos] = @intCast(seg);
+        pos += 1;
+        @memcpy(out[pos..][0..seg], name[start..]);
+        pos += seg;
+    }
+    if (pos >= out.len) return null;
+    out[pos] = 0;
+    return pos + 1;
+}
+
+fn skipDnsName(pkt: []const u8, start: usize) ?usize {
+    var pos = start;
+    while (pos < pkt.len) {
+        const b = pkt[pos];
+        if (b == 0) return pos + 1;
+        if ((b & 0xc0) == 0xc0) {
+            if (pos + 1 >= pkt.len) return null;
+            return pos + 2;
+        }
+        pos += 1 + @as(usize, b);
+    }
+    return null;
+}
+
+fn readResolvNameserver() [4]u8 {
+    const path = "/etc/resolv.conf";
+    const fd_res = sys.sys4(sys.NR.openat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(path.ptr), sys.O_RDONLY, 0);
+    if (sys.isErr(fd_res) != null) return .{ 127, 0, 0, 53 };
+    const fd: usize = fd_res;
+    defer _ = sys.sys1(sys.NR.close, fd);
+    var buf: [2048]u8 = undefined;
+    const n_res = sys.sys3(sys.NR.read, fd, @intFromPtr(&buf), buf.len);
+    if (sys.isErr(n_res) != null) return .{ 127, 0, 0, 53 };
+    const text = buf[0..n_res];
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (std.mem.startsWith(u8, line, "nameserver")) {
+            const rest = std.mem.trim(u8, line["nameserver".len..], " \t");
+            if (parseIpv4(rest)) |ip| return ip;
+        }
+    }
+    return .{ 127, 0, 0, 53 };
+}
+
+fn abiNetLookup(ov: *pal_abi.Overlapped, name_ptr: [*]const u8, name_len: usize, out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) void {
+    if (name_len == 0 or name_len > 255) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const name = name_ptr[0..name_len];
+    if (std.mem.eql(u8, name, "localhost")) {
+        if (cap < 5) {
+            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        out[0] = 4;
+        out[1] = 127;
+        out[2] = 0;
+        out[3] = 0;
+        out[4] = 1;
+        completeInline(ov, 0, 0, 5);
+        return;
+    }
+    if (parseIpv4(name)) |ip| {
+        if (cap < 5) {
+            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        out[0] = 4;
+        @memcpy(out[1..5], &ip);
+        completeInline(ov, 0, 0, 5);
+        return;
+    }
+
+    var pkt: [512]u8 = @splat(0);
+    pkt[0] = 0x12;
+    pkt[1] = 0x34;
+    pkt[2] = 0x01; // RD=1
+    pkt[5] = 0x01; // QDCOUNT=1
+    const qend = writeDnsQname(pkt[12..], name) orelse {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    };
+    const qoff = 12 + qend;
+    if (qoff + 4 > pkt.len) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    pkt[qoff] = 0;
+    pkt[qoff + 1] = 1; // QTYPE = A
+    pkt[qoff + 2] = 0;
+    pkt[qoff + 3] = 1; // QCLASS = IN
+    const pkt_len = qoff + 4;
+
+    const sock_res = sys.sys3(sys.NR.socket, 2, 2 | 0o2000000, 17); // AF_INET, SOCK_DGRAM|SOCK_CLOEXEC, IPPROTO_UDP
+    if (sys.isErr(sock_res) != null) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    const fd: usize = sock_res;
+    defer _ = sys.sys1(sys.NR.close, fd);
+
+    var sa: sys.SockAddrIn = .{
+        .family = 2,
+        .port_be = std.mem.nativeToBig(u16, 53),
+        .addr = readResolvNameserver(),
+    };
+    if (sys.isErr(sys.sys3(sys.NR.connect, fd, @intFromPtr(&sa), @sizeOf(sys.SockAddrIn))) != null) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    if (sys.isErr(sys.sys3(sys.NR.write, fd, @intFromPtr(&pkt), pkt_len)) != null) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    var pfd: sys.PollFd = .{ .fd = @intCast(fd), .events = sys.POLLIN, .revents = 0 };
+    var ts: sys.Timespec = .{ .sec = 2, .nsec = 0 };
+    const pres = sys.sys4(sys.NR.ppoll, @intFromPtr(&pfd), 1, @intFromPtr(&ts), 0);
+    if (sys.isErr(pres) != null or pres == 0) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    var resp: [512]u8 = undefined;
+    const rlen_res = sys.sys3(sys.NR.read, fd, @intFromPtr(&resp), resp.len);
+    if (sys.isErr(rlen_res) != null or rlen_res < 12) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    const r = resp[0..rlen_res];
+    const qdcount = std.mem.readInt(u16, r[4..6], .big);
+    const ancount = std.mem.readInt(u16, r[6..8], .big);
+    var pos: usize = 12;
+    for (0..qdcount) |_| {
+        pos = skipDnsName(r, pos) orelse {
+            completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+            return;
+        };
+        if (pos + 4 > r.len) break;
+        pos += 4;
+    }
+    var written: usize = 0;
+    for (0..ancount) |_| {
+        pos = skipDnsName(r, pos) orelse break;
+        if (pos + 10 > r.len) break;
+        const rtype = std.mem.readInt(u16, r[pos..][0..2], .big);
+        const rdlen = std.mem.readInt(u16, r[pos + 8 ..][0..2], .big);
+        pos += 10;
+        if (pos + rdlen > r.len) break;
+        if (rtype == 1 and rdlen == 4 and written + 5 <= cap) {
+            out[written] = 4;
+            @memcpy(out[written + 1 ..][0..4], r[pos..][0..4]);
+            written += 5;
+        }
+        pos += rdlen;
+    }
+    if (written == 0) {
+        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    completeInline(ov, 0, 0, written);
 }
 fn abiNetCertVerify(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: [*]const u8, _: usize) callconv(pal_abi.pal_cc) void {
     completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
 }
 
-fn abiProcessSpawn(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize) callconv(pal_abi.pal_cc) void {
-    completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+fn nextNullStr(buf: []const u8, pos: *usize) ?[]const u8 {
+    if (pos.* >= buf.len) return null;
+    const start = pos.*;
+    var end = start;
+    while (end < buf.len and buf[end] != 0) : (end += 1) {}
+    if (end == start) {
+        pos.* = if (end < buf.len) end + 1 else buf.len;
+        return "";
+    }
+    pos.* = if (end < buf.len) end + 1 else buf.len;
+    return buf[start..end];
+}
+
+fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const cfg = cfg_ptr[0..cfg_len];
+    var pos: usize = 0;
+
+    const prog = nextNullStr(cfg, &pos) orelse {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    };
+    if (prog.len == 0 or prog.len >= 4095) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+
+    var arg_storage: [4096]u8 = undefined;
+    var argv_ptrs: [64]?[*:0]const u8 = @splat(null);
+    var arg_off: usize = 0;
+    var argc: usize = 0;
+
+    @memcpy(arg_storage[0..prog.len], prog);
+    arg_storage[prog.len] = 0;
+    argv_ptrs[0] = @ptrCast(&arg_storage[0]);
+    arg_off = prog.len + 1;
+    argc = 1;
+
+    while (nextNullStr(cfg, &pos)) |arg| {
+        if (arg.len == 0) break;
+        if (argc < 63 and arg_off + arg.len + 1 <= arg_storage.len) {
+            @memcpy(arg_storage[arg_off..][0..arg.len], arg);
+            arg_storage[arg_off + arg.len] = 0;
+            argv_ptrs[argc] = @ptrCast(&arg_storage[arg_off]);
+            arg_off += arg.len + 1;
+            argc += 1;
+        }
+    }
+    argv_ptrs[argc] = null;
+
+    while (nextNullStr(cfg, &pos)) |env_item| {
+        if (env_item.len == 0) break;
+    }
+
+    var cwd_buf: [4096]u8 = undefined;
+    var has_cwd = false;
+    if (nextNullStr(cfg, &pos)) |c| {
+        if (c.len > 0 and c.len < cwd_buf.len) {
+            @memcpy(cwd_buf[0..c.len], c);
+            cwd_buf[c.len] = 0;
+            has_cwd = true;
+        }
+    }
+
+    var stdio_specs: [3][]const u8 = .{ "", "", "" };
+    var has_stdio = false;
+    var si_idx: usize = 0;
+    while (nextNullStr(cfg, &pos)) |spec| {
+        if (spec.len == 0) break;
+        has_stdio = true;
+        if (si_idx < 3) {
+            stdio_specs[si_idx] = spec;
+            si_idx += 1;
+        }
+    }
+
+    var in_fds: [2]i32 = .{ -1, -1 };
+    var out_fds: [2]i32 = .{ -1, -1 };
+    var err_fds: [2]i32 = .{ -1, -1 };
+    var child_fds: [3]i32 = .{ 0, 1, 2 };
+
+    if (has_stdio) {
+        for (0..3) |idx| {
+            const spec = stdio_specs[idx];
+            if (std.mem.eql(u8, spec, "null")) {
+                const null_p = "/dev/null";
+                const flags: u32 = if (idx == 0) sys.O_RDONLY else sys.O_WRONLY;
+                const nfd = sys.sys4(sys.NR.openat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(null_p.ptr), flags, 0);
+                if (sys.isErr(nfd) == null) child_fds[idx] = @intCast(nfd);
+            } else if (std.mem.startsWith(u8, spec, "fd:")) {
+                const tok = std.fmt.parseInt(u64, spec[3..], 10) catch 0;
+                if (tok <= 2) {
+                    child_fds[idx] = @intCast(tok);
+                } else if (findHandle(s, tok)) |fhe| {
+                    child_fds[idx] = fhe.fd;
+                }
+            }
+        }
+    } else {
+        if (sys.isErr(sys.sys2(sys.NR.pipe2, @intFromPtr(&in_fds), 0)) != null or
+            sys.isErr(sys.sys2(sys.NR.pipe2, @intFromPtr(&out_fds), 0)) != null or
+            sys.isErr(sys.sys2(sys.NR.pipe2, @intFromPtr(&err_fds), 0)) != null)
+        {
+            completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        }
+        child_fds = .{ in_fds[0], out_fds[1], err_fds[1] };
+    }
+
+    const pid_res = sys.sys2(sys.NR.clone, 17, 0); // SIGCHLD = 17
+    if (sys.isErr(pid_res)) |e| {
+        if (!has_stdio) {
+            _ = sys.sys1(sys.NR.close, @intCast(in_fds[0]));
+            _ = sys.sys1(sys.NR.close, @intCast(in_fds[1]));
+            _ = sys.sys1(sys.NR.close, @intCast(out_fds[0]));
+            _ = sys.sys1(sys.NR.close, @intCast(out_fds[1]));
+            _ = sys.sys1(sys.NR.close, @intCast(err_fds[0]));
+            _ = sys.sys1(sys.NR.close, @intCast(err_fds[1]));
+        }
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
+    }
+
+    const pid: i32 = @intCast(pid_res);
+    if (pid == 0) {
+        // Child
+        if (!has_stdio) {
+            _ = sys.sys1(sys.NR.close, @intCast(in_fds[1]));
+            _ = sys.sys1(sys.NR.close, @intCast(out_fds[0]));
+            _ = sys.sys1(sys.NR.close, @intCast(err_fds[0]));
+        }
+        for (0..3) |idx| {
+            const target: i32 = @intCast(idx);
+            if (child_fds[idx] != target) {
+                _ = sys.sys3(sys.NR.dup3, @intCast(child_fds[idx]), @intCast(target), 0);
+            }
+        }
+        if (has_cwd) {
+            _ = sys.sys1(sys.NR.chdir, @intFromPtr(&cwd_buf));
+        }
+        const envp = s.host.envp;
+        _ = sys.sys3(sys.NR.execve, @intFromPtr(argv_ptrs[0].?), @intFromPtr(&argv_ptrs), @intFromPtr(envp));
+        _ = sys.sys1(sys.NR.exit_group, 127);
+        unreachable;
+    }
+
+    // Parent
+    if (!has_stdio) {
+        _ = sys.sys1(sys.NR.close, @intCast(in_fds[0]));
+        _ = sys.sys1(sys.NR.close, @intCast(out_fds[1]));
+        _ = sys.sys1(sys.NR.close, @intCast(err_fds[1]));
+    }
+
+    const proc_he = allocHandle(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    proc_he.fd = pid;
+    proc_he.is_process = true;
+
+    const pso: *pal_abi.ProcessSpawnOverlapped = @ptrCast(@alignCast(ov));
+    pso.child_handle = proc_he.token;
+    pso.pty_handle = 0;
+    if (!has_stdio) {
+        const in_he = allocHandle(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        in_he.fd = in_fds[1];
+        const out_he = allocHandle(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        out_he.fd = out_fds[0];
+        const err_he = allocHandle(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        err_he.fd = err_fds[0];
+        pso.in_handle = in_he.token;
+        pso.out_handle = out_he.token;
+        pso.err_handle = err_he.token;
+    } else {
+        pso.in_handle = 0;
+        pso.out_handle = 0;
+        pso.err_handle = 0;
+    }
+    completeInline(ov, 0, 0, proc_he.token);
 }
 
 fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
@@ -712,13 +1222,45 @@ fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
     };
     r_he.fd = fds[0];
     w_he.fd = fds[1];
-    completeInline(ov, 0, r_he.token, w_he.token);
+    completeInline(ov, 0, 0, (w_he.token << 32) | (r_he.token & 0xffff_ffff));
 }
 
-fn abiProcessWait(ov: *pal_abi.Overlapped, _: u64) callconv(pal_abi.pal_cc) void {
-    completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+fn abiProcessWait(ov: *pal_abi.Overlapped, proc_handle: u64) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const he = findHandle(s, proc_handle) orelse {
+        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
+        return;
+    };
+    if (!he.is_process) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    var status: i32 = 0;
+    const res = sys.sys4(sys.NR.wait4, @intCast(he.fd), @intFromPtr(&status), 1, 0); // WNOHANG = 1
+    if (sys.isErr(res)) |e| {
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
+    }
+    if (res == 0) {
+        const op = allocOp(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .wait_proc;
+        op.guest_ov = ov;
+        op.pid = he.fd;
+        return;
+    }
+    const code: u32 = @intCast((status >> 8) & 0xff);
+    completeInline(ov, 0, 0, code);
 }
-fn abiProcessSignal(_: u64, _: u32) callconv(pal_abi.pal_cc) void {}
+
+fn abiProcessSignal(proc_handle: u64, signum: u32) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const he = findHandle(s, proc_handle) orelse return;
+    if (!he.is_process) return;
+    _ = sys.sys2(sys.NR.kill, @intCast(he.fd), signum);
+}
 fn abiSignalWait(ov: *pal_abi.Overlapped, _: u32) callconv(pal_abi.pal_cc) void {
     completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
 }
@@ -837,10 +1379,27 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                     const rem = op.deadline_ns - now;
                     if (min_wait_ns == null or rem < min_wait_ns.?) min_wait_ns = rem;
                 }
-            } else if (op.kind == .read_fd and pfd_count < pfds.len) {
+            } else if ((op.kind == .read_fd or op.kind == .accept) and pfd_count < pfds.len) {
                 pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLIN, .revents = 0 };
                 op_idx[pfd_count] = idx;
                 pfd_count += 1;
+            } else if (op.kind == .wait_proc) {
+                var status: i32 = 0;
+                const wres = sys.sys4(sys.NR.wait4, @intCast(op.pid), @intFromPtr(&status), 1, 0);
+                if (sys.isErr(wres)) |e| {
+                    const gov = op.guest_ov.?;
+                    freeOp(s, op);
+                    completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    fired = true;
+                } else if (wres != 0) {
+                    const gov = op.guest_ov.?;
+                    freeOp(s, op);
+                    completeInline(gov, 0, 0, @intCast((status >> 8) & 0xff));
+                    fired = true;
+                } else {
+                    const poll_ns: u64 = 10_000_000;
+                    if (min_wait_ns == null or poll_ns < min_wait_ns.?) min_wait_ns = poll_ns;
+                }
             }
         }
         if (fired) continue;
@@ -858,12 +1417,34 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                 const op = &s.ops[op_idx[i]];
                 if (!op.used) continue;
                 const gov = op.guest_ov.?;
-                const res = sys.sys3(sys.NR.read, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);
-                freeOp(s, op);
-                if (sys.isErr(res)) |e| {
-                    completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                if (op.kind == .accept) {
+                    const ares = sys.sys3(sys.NR.accept, @intCast(op.fd), 0, 0);
+                    freeOp(s, op);
+                    if (sys.isErr(ares)) |e| {
+                        completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    } else {
+                        const cli_fd: i32 = @intCast(ares);
+                        const fl = sys.sys3(sys.NR.fcntl, @intCast(cli_fd), 3, 0);
+                        if (sys.isErr(fl) == null) {
+                            _ = sys.sys3(sys.NR.fcntl, @intCast(cli_fd), 4, fl | sys.O_NONBLOCK);
+                        }
+                        if (allocHandle(s)) |cli_he| {
+                            cli_he.fd = cli_fd;
+                            cli_he.is_socket = true;
+                            completeInline(gov, 0, 0, cli_he.token);
+                        } else {
+                            _ = sys.sys1(sys.NR.close, @intCast(cli_fd));
+                            completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
+                        }
+                    }
                 } else {
-                    completeInline(gov, 0, 0, res);
+                    const res = sys.sys3(sys.NR.read, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);
+                    freeOp(s, op);
+                    if (sys.isErr(res)) |e| {
+                        completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    } else {
+                        completeInline(gov, 0, 0, res);
+                    }
                 }
             }
         }

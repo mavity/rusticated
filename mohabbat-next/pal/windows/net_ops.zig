@@ -98,18 +98,18 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
         return;
     }
 
-    const ip = parseIpv4(addr_ptr[0..addr_len]) orelse {
+    const ip = if (addr_len == 0) [4]u8{ 0, 0, 0, 0 } else (parseIpv4(addr_ptr[0..addr_len]) orelse {
         _ = close_fn(sock);
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
+    });
     var sa: SockAddrIn = .{
         .family = 2,
         .port_be = std.mem.nativeToBig(u16, @intCast(port & 0xffff)),
         .addr = ip,
     };
 
-    const listen_mode = (flags & pal_abi.NET_OPEN_FLAG_LISTEN) != 0;
+    const listen_mode = (flags & 1) == 0;
     if (listen_mode) {
         const p_bind = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "bind") orelse {
             _ = close_fn(sock);
@@ -174,6 +174,29 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
     mem.completeInline(ov, 0, port, he.token);
 }
 
+fn netAcceptWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s: *PalState = @ptrCast(@alignCast(op.pal_state orelse return 0));
+    const pq = s.p_post_queued orelse return 0;
+    const p_acc = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "accept") orelse {
+        op.win_ov.internal = pal_abi.ERROR_UNSUPPORTED;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const AcceptFn = *const fn (usize, ?*anyopaque, ?*i32) callconv(win.win_cc) usize;
+    const acc: AcceptFn = @ptrCast(@alignCast(p_acc));
+    const cli = acc(op.sock_fd, null, null);
+    if (cli == std.math.maxInt(usize)) {
+        op.win_ov.internal = pal_abi.ERROR_IO;
+        op.win_ov.internal_high = 0;
+    } else {
+        op.win_ov.internal = 0;
+        op.win_ov.internal_high = cli;
+    }
+    _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+    return 0;
+}
+
 pub fn netAccept(s: *PalState, ov: *pal_abi.Overlapped, listener: u64) void {
     const he = mem.findHandle(s, listener) orelse {
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
@@ -183,29 +206,23 @@ pub fn netAccept(s: *PalState, ov: *pal_abi.Overlapped, listener: u64) void {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     }
-    const p_acc = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "accept") orelse {
-        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
-        return;
-    };
-    const AcceptFn = *const fn (usize, ?*anyopaque, ?*i32) callconv(win.win_cc) usize;
-    const acc: AcceptFn = @ptrCast(@alignCast(p_acc));
-    const cli = acc(@intFromPtr(he.handle), null, null);
-    if (cli == std.math.maxInt(usize)) {
-        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-        return;
-    }
-    const cli_he = mem.allocHandle(s) orelse {
-        if (mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "closesocket")) |p_c| {
-            const CloseSockFn = *const fn (usize) callconv(win.win_cc) i32;
-            const c_fn: CloseSockFn = @ptrCast(@alignCast(p_c));
-            _ = c_fn(cli);
-        }
+    const op = mem.allocOp(s) orelse {
         mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
     };
-    cli_he.handle = @ptrFromInt(cli);
-    cli_he.is_socket = true;
-    mem.completeInline(ov, 0, 0, cli_he.token);
+    op.kind = .accept;
+    op.guest_ov = ov;
+    op.sock_fd = @intFromPtr(he.handle);
+    op.pal_state = s;
+    if (s.p_create_thread) |ct| {
+        const th = ct(null, 0, netAcceptWorker, op, 0, null);
+        if (th != null) {
+            if (s.p_close_handle) |ch| _ = ch(th);
+            return;
+        }
+    }
+    mem.freeOp(s, op);
+    mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
 }
 
 pub fn netLookup(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, len: usize, out: [*]u8, cap: usize) void {
@@ -259,6 +276,147 @@ pub fn netLookup(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, len: 
     mem.completeInline(ov, 0, 0, written);
 }
 
-pub fn netCertVerify(_: *PalState, ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: [*]const u8, _: usize) void {
-    mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+const CertChainPara = extern struct {
+    cb_size: u32 = @sizeOf(CertChainPara),
+    requested_usage: [24]u8 = @splat(0),
+};
+
+const SslExtraCertChainPolicyPara = extern struct {
+    cb_size: u32 = @sizeOf(SslExtraCertChainPolicyPara),
+    dw_auth_type: u32 = 2, // AUTHTYPE_SERVER
+    fdw_checks: u32 = 0,
+    pwsz_server_name: ?[*:0]const u16 = null,
+};
+
+const CertChainPolicyPara = extern struct {
+    cb_size: u32 = @sizeOf(CertChainPolicyPara),
+    dw_flags: u32 = 0,
+    pv_extra_policy_para: ?*anyopaque = null,
+};
+
+const CertChainPolicyStatus = extern struct {
+    cb_size: u32 = @sizeOf(CertChainPolicyStatus),
+    dw_error: u32 = 0,
+    l_chain_index: i32 = 0,
+    l_element_index: i32 = 0,
+    pv_extra_policy_status: ?*anyopaque = null,
+};
+
+pub fn netCertVerify(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, n_len: usize, chain_ptr: [*]const u8, c_len: usize) void {
+    if (c_len < 4) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const payload = chain_ptr[0..c_len];
+    const count = std.mem.readInt(u32, payload[0..4], .little);
+    if (count == 0 or 4 + @as(usize, count) * 4 > c_len) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+
+    const p_open = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertOpenStore") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_add = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertAddEncodedCertificateToStore") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_chain = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertGetCertificateChain") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_verify = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertVerifyCertificateChainPolicy") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_free_chain = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertFreeCertificateChain") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_close = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertCloseStore") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_free_ctx = mem.resolveDll(s, &s.crypt32, "crypt32.dll", "CertFreeCertificateContext");
+
+    const OpenStoreFn = *const fn (usize, u32, usize, u32, ?*const anyopaque) callconv(win.win_cc) ?*anyopaque;
+    const AddCertFn = *const fn (?*anyopaque, u32, [*]const u8, u32, u32, ?*?*anyopaque) callconv(win.win_cc) i32;
+    const GetChainFn = *const fn (?*anyopaque, ?*anyopaque, ?*anyopaque, ?*anyopaque, *const CertChainPara, u32, ?*anyopaque, *?*anyopaque) callconv(win.win_cc) i32;
+    const VerifyPolicyFn = *const fn (usize, ?*anyopaque, *const CertChainPolicyPara, *CertChainPolicyStatus) callconv(win.win_cc) i32;
+    const FreeChainFn = *const fn (?*anyopaque) callconv(win.win_cc) void;
+    const CloseStoreFn = *const fn (?*anyopaque, u32) callconv(win.win_cc) i32;
+    const FreeCtxFn = *const fn (?*anyopaque) callconv(win.win_cc) i32;
+
+    const open_store: OpenStoreFn = @ptrCast(@alignCast(p_open));
+    const add_cert: AddCertFn = @ptrCast(@alignCast(p_add));
+    const get_chain: GetChainFn = @ptrCast(@alignCast(p_chain));
+    const verify_policy: VerifyPolicyFn = @ptrCast(@alignCast(p_verify));
+    const free_chain: FreeChainFn = @ptrCast(@alignCast(p_free_chain));
+    const close_store: CloseStoreFn = @ptrCast(@alignCast(p_close));
+
+    // CERT_STORE_PROV_MEMORY = 2
+    const store = open_store(2, 0, 0, 0, null) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+        return;
+    };
+    defer _ = close_store(store, 0);
+
+    var off: usize = 4 + @as(usize, count) * 4;
+    var leaf_ctx: ?*anyopaque = null;
+    defer if (leaf_ctx) |lc| {
+        if (p_free_ctx) |fc| {
+            const free_ctx: FreeCtxFn = @ptrCast(@alignCast(fc));
+            _ = free_ctx(lc);
+        }
+    };
+
+    for (0..count) |i| {
+        const dlen = std.mem.readInt(u32, payload[4 + i * 4 ..][0..4], .little);
+        if (off + dlen > c_len) {
+            mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        const der = payload[off .. off + dlen];
+        off += dlen;
+        // X509_ASN_ENCODING | PKCS_7_ASN_ENCODING = 0x10001, CERT_STORE_ADD_ALWAYS = 4
+        if (i == 0) {
+            if (add_cert(store, 0x10001, der.ptr, dlen, 4, &leaf_ctx) == 0 or leaf_ctx == null) {
+                mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+                return;
+            }
+        } else {
+            _ = add_cert(store, 0x10001, der.ptr, dlen, 4, null);
+        }
+    }
+
+    var wname: ?[*:0]u16 = null;
+    if (n_len > 0) {
+        wname = mem.utf8ToWideAlloc(s, name, n_len);
+    }
+    defer if (wname) |wn| {
+        if (s.host.free) |free| free(@ptrCast(@constCast(wn)));
+    };
+
+    var chain_para: CertChainPara = .{};
+    var chain_ctx: ?*anyopaque = null;
+    if (get_chain(null, leaf_ctx, null, store, &chain_para, 0, null, &chain_ctx) == 0 or chain_ctx == null) {
+        mem.completeInline(ov, 0, 0, 0);
+        return;
+    }
+    defer free_chain(chain_ctx);
+
+    var ssl_para: SslExtraCertChainPolicyPara = .{
+        .pwsz_server_name = wname,
+    };
+    var policy_para: CertChainPolicyPara = .{
+        .pv_extra_policy_para = &ssl_para,
+    };
+    var status: CertChainPolicyStatus = .{};
+    // CERT_CHAIN_POLICY_SSL = 4
+    if (verify_policy(4, chain_ctx, &policy_para, &status) == 0) {
+        mem.completeInline(ov, 0, 0, 0);
+        return;
+    }
+    mem.completeInline(ov, 0, 0, if (status.dw_error == 0) 1 else 0);
 }

@@ -85,9 +85,13 @@ fn flushAndExit(g: *AbiGlobals) void {
     if (g.out_len > 0) {
         g.phase = PHASE_PRINT;
         g.out_off = 0;
-        g.write_ov = .{};
-        getAbi().write(&g.write_ov, 1, @ptrCast(&g.out[0]), g.out_len);
-        return;
+        while (g.out_off < g.out_len) {
+            g.write_ov = .{};
+            getAbi().write(&g.write_ov, 1, @ptrCast(&g.out[g.out_off]), g.out_len - g.out_off);
+            if ((g.write_ov.flags & abi_types.FLAG_COMPLETED) == 0) return;
+            if (g.write_ov.@"error" != 0) getAbi().process_exit(1);
+            g.out_off += @intCast(g.write_ov.result_ext);
+        }
     }
     getAbi().process_exit(if (g.failed) 1 else 0);
 }
@@ -453,7 +457,7 @@ fn runNet(g: *AbiGlobals) void {
             passCase(g, "net/lookup");
         }
         g.ov1 = .{};
-        getAbi().net_open(&g.ov1, lo.ptr, lo.len, 0, abi_types.NET_OPEN_FLAG_LISTEN);
+        getAbi().net_open(&g.ov1, lo.ptr, lo.len, 0, 0); // flags=0: listen
         g.step = 2;
         if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
     }
@@ -469,7 +473,7 @@ fn runNet(g: *AbiGlobals) void {
         passCase(g, "net/listen");
 
         g.ov1 = .{};
-        getAbi().net_open(&g.ov1, lo.ptr, lo.len, g.port, 0);
+        getAbi().net_open(&g.ov1, lo.ptr, lo.len, g.port, 1); // flags=1: connect
         g.step = 3;
         if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
     }
@@ -549,13 +553,15 @@ fn runProc(g: *AbiGlobals) void {
     }
 
     if (g.step == 1) {
-        if (g.ov1.@"error" != 0 or g.ov1.continued < 3 or g.ov1.result_ext < 3) {
+        const r_tok: u64 = @as(u32, @truncate(g.ov1.result_ext));
+        const w_tok: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+        if (g.ov1.@"error" != 0 or r_tok < 3 or w_tok < 3) {
             failCase(g, "proc/pipe", g.ov1.@"error");
             flushAndExit(g);
             return;
         }
-        g.h1 = g.ov1.continued; // read end
-        g.h2 = g.ov1.result_ext; // write end
+        g.h1 = r_tok;
+        g.h2 = w_tok;
         passCase(g, "proc/pipe");
 
         g.ov1 = .{};

@@ -136,6 +136,18 @@ pub fn getPlatformInfo(s: *PalState, out: [*]u8, cap: usize) u32 {
     copyFixed(&info.rusticated_name, "rusticated");
     copyFixed(&info.build_platform, if (builtin.cpu.arch == .x86_64) "windows-amd64" else "windows-arm64");
 
+    // Populate user_home_dir via GetEnvironmentVariableW(L"USERPROFILE")
+    if (mem.resolveKernel32(s, "GetEnvironmentVariableW")) |p_gev| {
+        const GetEnvWFn = *const fn ([*:0]const u16, [*]u16, u32) callconv(win.win_cc) u32;
+        const get_env: GetEnvWFn = @ptrCast(@alignCast(p_gev));
+        const key_up = [_:0]u16{ 'U', 'S', 'E', 'R', 'P', 'R', 'O', 'F', 'I', 'L', 'E' };
+        var wbuf: [260]u16 = undefined;
+        const wlen = get_env(&key_up, &wbuf, wbuf.len);
+        if (wlen > 0 and wlen < wbuf.len) {
+            _ = mem.wideToUtf8(s, &wbuf, @intCast(wlen), &info.user_home_dir, info.user_home_dir.len);
+        }
+    }
+
     // Populate temp_dir via GetTempPathW
     if (mem.resolveKernel32(s, "GetTempPathW")) |p_tmp| {
         const GetTempWFn = *const fn (u32, [*]u16) callconv(win.win_cc) u32;

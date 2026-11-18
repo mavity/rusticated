@@ -132,6 +132,8 @@ func TestAssembleVegetableBashHandoff(t *testing.T) {
 		HelloAarch64:           writeAsset("hello-aarch64"),
 		FileIoX86_64:           writeAsset("fileio-x86_64"),
 		FileIoAarch64:          writeAsset("fileio-aarch64"),
+		AbiConformanceX86_64:   writeAsset("abi-conformance-x86_64"),
+		AbiConformanceAarch64:  writeAsset("abi-conformance-aarch64"),
 	}
 
 	templatesDir := filepath.Join(workDir, "templates")

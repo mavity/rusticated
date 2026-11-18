@@ -29,6 +29,7 @@ pub const OpKind = enum(u8) {
     timer = 3,
     accept = 4,
     proc_wait = 5,
+    sock_recv = 6,
 };
 
 pub const PendingOp = struct {
@@ -36,6 +37,8 @@ pub const PendingOp = struct {
     kind: OpKind = .none,
     guest_ov: ?*pal_abi.Overlapped = null,
     handle_token: u64 = 0,
+    sock_fd: usize = 0,
+    pal_state: ?*anyopaque = null,
     buf: ?[*]u8 = null,
     len: usize = 0,
     positional: bool = false,
@@ -50,8 +53,8 @@ pub const PalState = struct {
     host: win.WindowsPlatformHost = undefined,
     kernel32: ?*anyopaque = null,
     ws2_32: ?*anyopaque = null,
-    bcrypt: ?*anyopaque = null,
     crypt32: ?*anyopaque = null,
+    bcrypt: ?*anyopaque = null,
     iocp: win.HANDLE = null,
     stdin_h: win.HANDLE = null,
     stdout_h: win.HANDLE = null,

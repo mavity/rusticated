@@ -15,7 +15,18 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
     };
     defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
 
-    const is_dir = (flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0;
+    var is_dir = (flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0;
+    const create = (flags & pal_abi.OPEN_FLAG_CREATE) != 0;
+    if (!is_dir and !create) {
+        if (mem.resolveKernel32(s, "GetFileAttributesExW")) |p_attr| {
+            const GetAttrFn = *const fn ([*:0]const u16, u32, *win.Win32FileAttributeData) callconv(win.win_cc) i32;
+            const get_attr: GetAttrFn = @ptrCast(@alignCast(p_attr));
+            var attr: win.Win32FileAttributeData = .{};
+            if (get_attr(wpath, 0, &attr) != 0 and (attr.attributes & 0x10) != 0) {
+                is_dir = true;
+            }
+        }
+    }
     if (is_dir) {
         // Verify directory exists via GetFileAttributesExW
         const p_attr = mem.resolveKernel32(s, "GetFileAttributesExW") orelse {
@@ -66,14 +77,14 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         else => 0xC000_0000, // GENERIC_READ | GENERIC_WRITE
     };
 
-    const create = (flags & pal_abi.OPEN_FLAG_CREATE) != 0;
+    const create_flag = (flags & pal_abi.OPEN_FLAG_CREATE) != 0;
     const excl = (flags & pal_abi.OPEN_FLAG_EXCL) != 0;
     const trunc = (flags & pal_abi.OPEN_FLAG_TRUNC) != 0;
-    const disposition: u32 = if (create and excl)
+    const disposition: u32 = if (create_flag and excl)
         1 // CREATE_NEW
-    else if (create and trunc)
+    else if (create_flag and trunc)
         2 // CREATE_ALWAYS
-    else if (create)
+    else if (create_flag)
         4 // OPEN_ALWAYS
     else if (trunc)
         5 // TRUNCATE_EXISTING
@@ -293,7 +304,7 @@ pub fn pathRemove(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len:
         return;
     };
     defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
-    const is_dir = (flags & pal_abi.PATH_REMOVE_FLAG_DIR) != 0;
+    const is_dir = (flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0;
     const fn_name: [*:0]const u8 = if (is_dir) "RemoveDirectoryW" else "DeleteFileW";
     const p_fn = mem.resolveKernel32(s, fn_name) orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
@@ -364,6 +375,119 @@ pub fn pathRename(s: *PalState, ov: *pal_abi.Overlapped, old_p: [*]const u8, o_l
     mem.completeInline(ov, 0, 0, 0);
 }
 
+pub fn pathChmod(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) void {
+    const wpath = mem.utf8ToWideAlloc(s, path, len) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    };
+    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+
+    const p_get = mem.resolveKernel32(s, "GetFileAttributesW") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_set = mem.resolveKernel32(s, "SetFileAttributesW") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const GetAttrW = *const fn ([*:0]const u16) callconv(win.win_cc) u32;
+    const SetAttrW = *const fn ([*:0]const u16, u32) callconv(win.win_cc) i32;
+    const get_attr: GetAttrW = @ptrCast(@alignCast(p_get));
+    const set_attr: SetAttrW = @ptrCast(@alignCast(p_set));
+
+    const cur = get_attr(wpath);
+    if (cur == 0xffff_ffff) {
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
+    }
+    const next_attr: u32 = if ((mode & 0o200) == 0) (cur | 0x1) else (cur & ~@as(u32, 0x1));
+    if (set_attr(wpath, next_attr) == 0) {
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
+    }
+    mem.completeInline(ov, 0, 0, 0);
+}
+
+fn unixToFileTime(s: *PalState, sec: i64, nsec: u32) ?win.FileTime {
+    if (nsec == 0x3ffffffe) return null; // UTIME_OMIT
+    if (nsec == 0x3fffffff) { // UTIME_NOW
+        var ft: win.FileTime = .{};
+        if (s.p_get_system_time_ft) |gst| gst(&ft);
+        return ft;
+    }
+    const ticks: i128 = @as(i128, sec) * 10_000_000 + @as(i128, @intCast(nsec / 100)) + 116_444_736_000_000_000;
+    const u: u64 = if (ticks < 0) 0 else @intCast(ticks);
+    return .{
+        .low = @truncate(u),
+        .high = @truncate(u >> 32),
+    };
+}
+
+pub fn pathSetTimes(
+    s: *PalState,
+    ov: *pal_abi.Overlapped,
+    path: [*]const u8,
+    len: usize,
+    at_sec: i64,
+    at_nsec: u32,
+    mt_sec: i64,
+    mt_nsec: u32,
+    flags: u32,
+) void {
+    const cf = s.p_create_file_w orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_sft = mem.resolveKernel32(s, "SetFileTime") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const wpath = mem.utf8ToWideAlloc(s, path, len) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    };
+    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+
+    var win_flags: u32 = 0x0200_0000; // FILE_FLAG_BACKUP_SEMANTICS
+    if ((flags & pal_abi.PATH_SET_TIMES_FLAG_NOFOLLOW) != 0) {
+        win_flags |= 0x0020_0000; // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    const h = cf(wpath, 0x0100, 0x7, null, 3, win_flags, null); // FILE_WRITE_ATTRIBUTES
+    if (h == win.INVALID_HANDLE_VALUE or h == null) {
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
+    }
+    defer if (s.p_close_handle) |ch| {
+        _ = ch(h);
+    };
+
+    var at_ft = unixToFileTime(s, at_sec, at_nsec);
+    var mt_ft = unixToFileTime(s, mt_sec, mt_nsec);
+    const SetFileTimeFn = *const fn (win.HANDLE, ?*const win.FileTime, ?*const win.FileTime, ?*const win.FileTime) callconv(win.win_cc) i32;
+    const sft: SetFileTimeFn = @ptrCast(@alignCast(p_sft));
+    if (sft(h, null, if (at_ft) |*p| p else null, if (mt_ft) |*p| p else null) == 0) {
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
+    }
+    mem.completeInline(ov, 0, 0, 0);
+}
+
 pub fn pathLink(s: *PalState, ov: *pal_abi.Overlapped, src: [*]const u8, s_len: usize, dst: [*]const u8, d_len: usize, _: u32) void {
     const w_src = mem.utf8ToWideAlloc(s, src, s_len) orelse {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
@@ -420,4 +544,84 @@ pub fn pathSymlink(s: *PalState, ov: *pal_abi.Overlapped, target: [*]const u8, t
         return;
     }
     mem.completeInline(ov, 0, 0, 0);
+}
+
+pub fn pathReadlink(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, out: [*]u8, cap: usize) void {
+    const cf = s.p_create_file_w orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const p_dev = mem.resolveKernel32(s, "DeviceIoControl") orelse {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    const wpath = mem.utf8ToWideAlloc(s, path, len) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    };
+    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+
+    // FILE_FLAG_OPEN_REPARSE_POINT (0x00200000) | FILE_FLAG_BACKUP_SEMANTICS (0x02000000)
+    const h = cf(wpath, 0, 0x7, null, 3, 0x0220_0000, null);
+    if (h == win.INVALID_HANDLE_VALUE or h == null) {
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
+    }
+    defer if (s.p_close_handle) |ch| {
+        _ = ch(h);
+    };
+
+    const DevIoFn = *const fn (win.HANDLE, u32, ?*anyopaque, u32, [*]u8, u32, *u32, ?*anyopaque) callconv(win.win_cc) i32;
+    const dev_io: DevIoFn = @ptrCast(@alignCast(p_dev));
+    var rbuf: [4096]u8 align(4) = undefined;
+    var returned: u32 = 0;
+    // FSCTL_GET_REPARSE_POINT = 0x000900a8
+    if (dev_io(h, 0x0009_00a8, null, 0, &rbuf, rbuf.len, &returned, null) == 0 or returned < 16) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+
+    const tag = std.mem.readInt(u32, rbuf[0..4], .little);
+    var name_off_bytes: usize = 0;
+    var name_len_bytes: usize = 0;
+    var path_buf_start: usize = 0;
+    if (tag == 0xA000_000C and returned >= 20) {
+        // IO_REPARSE_TAG_SYMLINK: PrintNameOffset (12..14), PrintNameLength (14..16), SubstituteNameOffset (8..10), SubstituteNameLength (10..12)
+        const print_off = std.mem.readInt(u16, rbuf[12..14], .little);
+        const print_len = std.mem.readInt(u16, rbuf[14..16], .little);
+        const sub_off = std.mem.readInt(u16, rbuf[8..10], .little);
+        const sub_len = std.mem.readInt(u16, rbuf[10..12], .little);
+        path_buf_start = 20;
+        if (print_len > 0) {
+            name_off_bytes = print_off;
+            name_len_bytes = print_len;
+        } else {
+            name_off_bytes = sub_off;
+            name_len_bytes = sub_len;
+        }
+    } else if (tag == 0xA000_0003 and returned >= 16) {
+        // IO_REPARSE_TAG_MOUNT_POINT
+        const print_off = std.mem.readInt(u16, rbuf[12..14], .little);
+        const print_len = std.mem.readInt(u16, rbuf[14..16], .little);
+        path_buf_start = 16;
+        name_off_bytes = print_off;
+        name_len_bytes = print_len;
+    } else {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+
+    const abs_off = path_buf_start + name_off_bytes;
+    if (abs_off + name_len_bytes > returned or (name_len_bytes % 2) != 0) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const wlen = name_len_bytes / 2;
+    const wptr: [*]const u16 = @ptrCast(@alignCast(&rbuf[abs_off]));
+    const n = mem.wideToUtf8(s, wptr, @intCast(wlen), out, cap);
+    mem.completeInline(ov, 0, 0, n);
 }

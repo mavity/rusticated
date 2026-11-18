@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -40,5 +41,31 @@ func (r *Runner) RunStage3NativeAbiConformanceTests() {
 			}
 			return nil
 		})
+	}
+
+	if wslPath, err := exec.LookPath("wsl.exe"); err == nil {
+		ctxCheck, cancelCheck := context.WithTimeout(context.Background(), wslStartupTimeout)
+		defer cancelCheck()
+		if out, err := exec.CommandContext(ctxCheck, wslPath, "-e", "uname", "-m").Output(); err == nil {
+			arch := strings.TrimSpace(string(out))
+			drive := strings.ToLower(r.DistExe[:1])
+			unixBundle := "/mnt/" + drive + "/" + filepath.ToSlash(r.DistExe[3:])
+			for _, suite := range nativeAbiSuites {
+				suite := suite
+				r.RunTest("abi/wsl-"+arch, suite, func() error {
+					wslDir := fmt.Sprintf("/tmp/mohabbat-abi-%d-%s", os.Getpid(), suite)
+					script := fmt.Sprintf("mkdir -p %s && bash %s --abi-test %s %s; rc=$?; rm -rf %s; exit $rc",
+						wslDir, unixBundle, wslDir, suite, wslDir)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, wslPath, "-e", "sh", "-c", script)
+					cmdOut, err := cmd.CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("%w\n%s", err, string(cmdOut))
+					}
+					return nil
+				})
+			}
+		}
 	}
 }

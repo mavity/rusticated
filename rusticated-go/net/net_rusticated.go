@@ -123,7 +123,18 @@ func rusticatedSocket(
 		}
 	}
 
-	fd.setAddr(sockaddrToAddr(laddr), sockaddrToAddr(raddr))
+	la := sockaddrToAddr(laddr)
+	ra := sockaddrToAddr(raddr)
+	if la == nil && ra != nil {
+		// Populate a non-nil local address so net.selfConnect does not
+		// treat fd.laddr == nil as a spurious TCP self-connect and retry.
+		if _, ok := ra.(*TCPAddr); ok {
+			la = &TCPAddr{}
+		} else if _, ok := ra.(*UDPAddr); ok {
+			la = &UDPAddr{}
+		}
+	}
+	fd.setAddr(la, ra)
 	return fd, nil
 }
 

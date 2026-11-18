@@ -171,6 +171,28 @@ fn stdHandleReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     return 0;
 }
 
+fn sockRecvWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s = statePtr();
+    const pq = s.p_post_queued orelse return 0;
+    const p_recv = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "recv") orelse {
+        op.win_ov.internal = pal_abi.ERROR_UNSUPPORTED;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const RecvFn = *const fn (usize, ?[*]u8, i32, i32) callconv(win.win_cc) i32;
+    const recv_fn: RecvFn = @ptrCast(@alignCast(p_recv));
+    const n = recv_fn(op.sock_fd, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), 0);
+    if (n < 0) {
+        op.win_ov.internal = pal_abi.ERROR_IO;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+    } else {
+        op.win_ov.internal = 0;
+        _ = pq(s.iocp, @intCast(n), @intFromPtr(op), &op.win_ov);
+    }
+    return 0;
+}
+
 fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(win.win_cc) void {
     const s = statePtr();
     if (handle == 0) {
@@ -208,18 +230,28 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         return;
     }
     if (he.is_socket) {
-        if (mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "recv")) |p_recv| {
-            const RecvFn = *const fn (usize, [*]u8, i32, i32) callconv(win.win_cc) i32;
-            const recv_fn: RecvFn = @ptrCast(@alignCast(p_recv));
-            const n = recv_fn(@intFromPtr(he.handle), buf, @intCast(@min(len, 0x7fff_ffff)), 0);
-            if (n < 0) {
-                mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            } else {
-                mem.completeInline(ov, 0, 0, @intCast(n));
-            }
+        if (len == 0) {
+            mem.completeInline(ov, 0, 0, 0);
             return;
         }
-        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        const op = mem.allocOp(s) orelse {
+            mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .sock_recv;
+        op.guest_ov = ov;
+        op.sock_fd = @intFromPtr(he.handle);
+        op.buf = buf;
+        op.len = len;
+        if (s.p_create_thread) |ct| {
+            const th = ct(null, 0, sockRecvWorker, op, 0, null);
+            if (th != null) {
+                if (s.p_close_handle) |ch| _ = ch(th);
+                return;
+            }
+        }
+        mem.freeOp(s, op);
+        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
         return;
     }
 
@@ -377,16 +409,16 @@ fn abiPathSymlink(ov: *pal_abi.Overlapped, target: [*]const u8, t_len: usize, li
     fs_ops.pathSymlink(statePtr(), ov, target, t_len, link, l_len, kind);
 }
 
-fn abiPathReadlink(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: [*]u8, _: usize) callconv(win.win_cc) void {
-    mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+fn abiPathReadlink(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, out: [*]u8, cap: usize) callconv(win.win_cc) void {
+    fs_ops.pathReadlink(statePtr(), ov, path, len, out, cap);
 }
 
-fn abiPathChmod(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: u32) callconv(win.win_cc) void {
-    mem.completeInline(ov, 0, 0, 0);
+fn abiPathChmod(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(win.win_cc) void {
+    fs_ops.pathChmod(statePtr(), ov, path, len, mode);
 }
 
-fn abiPathSetTimes(ov: *pal_abi.Overlapped, _: [*]const u8, _: usize, _: i64, _: u32, _: i64, _: u32, _: u32) callconv(win.win_cc) void {
-    mem.completeInline(ov, 0, 0, 0);
+fn abiPathSetTimes(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, at_sec: i64, at_nsec: u32, mt_sec: i64, mt_nsec: u32, flags: u32) callconv(win.win_cc) void {
+    fs_ops.pathSetTimes(statePtr(), ov, path, len, at_sec, at_nsec, mt_sec, mt_nsec, flags);
 }
 
 fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(win.win_cc) void {
@@ -604,9 +636,26 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
                     const op: *mem.PendingOp = @ptrFromInt(e.completion_key);
                     if (op.used) {
                         const gov = op.guest_ov.?;
-                        const err: u32 = if (op.canceled) pal_abi.ERROR_CANCELED else @intCast(op.win_ov.internal);
+                        const canceled = op.canceled;
+                        const kind = op.kind;
+                        const raw_err: u32 = @intCast(op.win_ov.internal);
+                        const raw_sock = op.win_ov.internal_high;
                         mem.freeOp(s, op);
-                        mem.completeInline(gov, err, 0, e.bytes_transferred);
+                        if (canceled) {
+                            mem.completeInline(gov, pal_abi.ERROR_CANCELED, 0, 0);
+                        } else if (kind == .accept) {
+                            if (raw_err != 0) {
+                                mem.completeInline(gov, raw_err, 0, 0);
+                            } else if (mem.allocHandle(s)) |cli_he| {
+                                cli_he.handle = @ptrFromInt(raw_sock);
+                                cli_he.is_socket = true;
+                                mem.completeInline(gov, 0, 0, cli_he.token);
+                            } else {
+                                mem.completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
+                            }
+                        } else {
+                            mem.completeInline(gov, raw_err, 0, e.bytes_transferred);
+                        }
                     }
                 }
             }

@@ -579,7 +579,7 @@ fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: 
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    const rc: c_int = if ((flags & pal_abi.PATH_REMOVE_FLAG_DIR) != 0)
+    const rc: c_int = if ((flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0)
         (s.p_rmdir orelse {
             completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
             return;
@@ -667,7 +667,7 @@ fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
     };
     r_he.fd = fds[0];
     w_he.fd = fds[1];
-    completeInline(ov, 0, r_he.token, w_he.token);
+    completeInline(ov, 0, 0, (w_he.token << 32) | (r_he.token & 0xffff_ffff));
 }
 fn abiProcessWait(ov: *pal_abi.Overlapped, _: u64) callconv(pal_abi.pal_cc) void {
     completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
