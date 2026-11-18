@@ -348,15 +348,44 @@ pub fn pathRemove(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len:
     };
     const DelFn = *const fn ([*:0]const u16) callconv(win.win_cc) i32;
     const del: DelFn = @ptrCast(@alignCast(p_fn));
-    if (del(wpath) == 0) {
-        const gle = s.p_get_last_error orelse {
-            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            return;
-        };
-        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+    if (del(wpath) != 0) {
+        mem.completeInline(ov, 0, 0, 0);
         return;
     }
-    mem.completeInline(ov, 0, 0, 0);
+
+    const get_error = s.p_get_last_error orelse {
+        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+        return;
+    };
+    const delete_error = get_error();
+    if (!is_dir and delete_error == 5) {
+        const get_attr_ptr = mem.resolveKernel32(s, "GetFileAttributesW");
+        const set_attr_ptr = mem.resolveKernel32(s, "SetFileAttributesW");
+        if (get_attr_ptr != null and set_attr_ptr != null) {
+            const GetAttrFn = *const fn ([*:0]const u16) callconv(win.win_cc) u32;
+            const SetAttrFn = *const fn ([*:0]const u16, u32) callconv(win.win_cc) i32;
+            const get_attr: GetAttrFn = @ptrCast(@alignCast(get_attr_ptr.?));
+            const set_attr: SetAttrFn = @ptrCast(@alignCast(set_attr_ptr.?));
+            const attributes = get_attr(wpath);
+            if (attributes != 0xffff_ffff and (attributes & 0x1) != 0) {
+                if (set_attr(wpath, attributes & ~@as(u32, 0x1)) != 0) {
+                    if (del(wpath) != 0) {
+                        mem.completeInline(ov, 0, 0, 0);
+                        return;
+                    }
+                    const retry_error = get_error();
+                    _ = set_attr(wpath, attributes);
+                    mem.completeInline(ov, win.mapWinError(retry_error), 0, 0);
+                    return;
+                }
+                const attr_error = get_error();
+                mem.completeInline(ov, win.mapWinError(attr_error), 0, 0);
+                return;
+            }
+        }
+    }
+    const mapped_error = if (delete_error == 0) pal_abi.ERROR_IO else win.mapWinError(delete_error);
+    mem.completeInline(ov, mapped_error, 0, 0);
 }
 
 pub fn pathMkdir(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, _: u32) void {

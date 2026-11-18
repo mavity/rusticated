@@ -87,6 +87,22 @@ func TestFilesystemLifecycle(t *testing.T) {
 	}
 }
 
+func TestRemoveReadOnlyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "read-only")
+	if err := os.WriteFile(path, []byte("read-only"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove read-only file: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stat after remove = %v, want not-exist", err)
+	}
+}
+
 func TestOverlappedFileSeekAndAppend(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "overlapped-file")
 	file, err := os.Create(path)
