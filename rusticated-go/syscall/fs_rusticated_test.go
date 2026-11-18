@@ -1,4 +1,4 @@
-Can //go:build wasip1
+//go:build wasip1
 
 package syscall
 
@@ -38,3 +38,4 @@ func TestReadRusticatedDirEntryKeepsIncompleteName(t *testing.T) {
 		t.Fatal("incomplete directory entry should remain buffered")
 	}
 }
+

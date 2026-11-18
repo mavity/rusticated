@@ -71,10 +71,12 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
     }
 
     const access_mode = flags & 3;
+    const append = (flags & pal_abi.OPEN_FLAG_APPEND) != 0;
+    const write_access: u32 = if (append) 0x0000_0004 else 0x4000_0000; // FILE_APPEND_DATA or GENERIC_WRITE
     const desired_access: u32 = switch (access_mode) {
         0 => 0x8000_0000, // GENERIC_READ
-        1 => 0x4000_0000, // GENERIC_WRITE
-        else => 0xC000_0000, // GENERIC_READ | GENERIC_WRITE
+        1 => write_access,
+        else => 0x8000_0000 | write_access,
     };
 
     const create_flag = (flags & pal_abi.OPEN_FLAG_CREATE) != 0;
@@ -92,7 +94,7 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         3; // OPEN_EXISTING
 
     const share: u32 = 0x1 | 0x2 | 0x4; // FILE_SHARE_READ | WRITE | DELETE
-    const h = cf(wpath, desired_access, share, null, disposition, 0x80, null);
+    const h = cf(wpath, desired_access, share, null, disposition, 0x4000_0080, null);
     if (h == win.INVALID_HANDLE_VALUE or h == null) {
         const gle = s.p_get_last_error orelse {
             mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
@@ -102,10 +104,19 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         return;
     }
 
-    if ((flags & pal_abi.OPEN_FLAG_APPEND) != 0) {
-        if (s.p_set_file_pointer_ex) |sfp| {
-            _ = sfp(h, 0, null, 2); // FILE_END
-        }
+    const associate_iocp = s.p_create_iocp orelse {
+        if (s.p_close_handle) |ch| _ = ch(h);
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    };
+    if (associate_iocp(h, s.iocp, 0, 0) == null) {
+        if (s.p_close_handle) |ch| _ = ch(h);
+        const gle = s.p_get_last_error orelse {
+            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+            return;
+        };
+        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        return;
     }
 
     const he = mem.allocHandle(s) orelse {
@@ -114,7 +125,8 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         return;
     };
     he.handle = h;
-    he.append_mode = (flags & pal_abi.OPEN_FLAG_APPEND) != 0;
+    he.is_overlapped = true;
+    he.append_mode = append;
     he.access_mode = @intCast(access_mode);
     mem.completeInline(ov, 0, 0, he.token);
 }
@@ -124,25 +136,42 @@ pub fn seek(s: *PalState, ov: *pal_abi.Overlapped, handle: u64, offset: i64, whe
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     };
-    const sfp = s.p_set_file_pointer_ex orelse {
-        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+    if (he.is_pipe or he.is_socket) {
+        mem.completeInline(ov, pal_abi.ERROR_SPIPE, 0, 0);
         return;
-    };
+    }
     if (whence > 2) {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     }
-    var new_pos: i64 = 0;
-    if (sfp(he.handle, offset, &new_pos, whence) == 0) {
-        const gle = s.p_get_last_error orelse {
-            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+    var base: i64 = 0;
+    if (whence == 1) {
+        if (he.seq_pos > 0x7fff_ffff_ffff_ffff) {
+            mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        base = @intCast(he.seq_pos);
+    } else if (whence == 2) {
+        const get_size = s.p_get_file_size_ex orelse {
+            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
             return;
         };
-        mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+        if (get_size(he.handle, &base) == 0) {
+            const gle = s.p_get_last_error orelse {
+                mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+                return;
+            };
+            mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+            return;
+        }
+    }
+    const new_pos = @addWithOverflow(base, offset);
+    if (new_pos[1] != 0 or new_pos[0] < 0) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     }
-    he.seq_pos = @intCast(@max(new_pos, 0));
-    mem.completeInline(ov, 0, 0, @intCast(new_pos));
+    he.seq_pos = @intCast(new_pos[0]);
+    mem.completeInline(ov, 0, 0, @intCast(new_pos[0]));
 }
 
 pub fn handleTruncate(s: *PalState, ov: *pal_abi.Overlapped, handle: u64, size: i64) void {
@@ -162,8 +191,15 @@ pub fn handleTruncate(s: *PalState, ov: *pal_abi.Overlapped, handle: u64, size: 
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
     };
-    var saved: i64 = 0;
-    _ = sfp(he.handle, 0, &saved, 1); // FILE_CURRENT
+    if (he.is_pipe or he.is_socket or he.is_dir) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    if (he.seq_pos > 0x7fff_ffff_ffff_ffff) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const saved: i64 = @intCast(he.seq_pos);
     if (sfp(he.handle, size, null, 0) == 0 or seo(he.handle) == 0) {
         const gle = s.p_get_last_error orelse {
             mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);

@@ -111,7 +111,6 @@ func discoverWasmTestTargets(repoRoot string) ([]wasmTestTarget, error) {
 			Dir:     wasmAbiDir,
 		})
 	}
-
 	return targets, nil
 }
 

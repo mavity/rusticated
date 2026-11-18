@@ -87,6 +87,62 @@ func TestFilesystemLifecycle(t *testing.T) {
 	}
 }
 
+func TestOverlappedFileSeekAndAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "overlapped-file")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(file, "abcdef"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(2, io.SeekStart); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	got := make([]byte, 2)
+	if _, err := io.ReadFull(file, got); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if string(got) != "cd" {
+		file.Close()
+		t.Fatalf("seek read = %q, want %q", got, "cd")
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err = os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first [1]byte
+	if _, err := io.ReadFull(file, first[:]); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if first[0] != 'a' {
+		file.Close()
+		t.Fatalf("read at initial append-mode offset = %q, want %q", first[0], 'a')
+	}
+	if _, err := io.WriteString(file, "!"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abcdef!" {
+		t.Fatalf("file after append = %q, want %q", got, "abcdef!")
+	}
+}
+
 func TestLinksAndMetadata(t *testing.T) {
 	dir := t.TempDir()
 	tgt := filepath.Join(dir, "target.txt")
@@ -176,5 +232,37 @@ func TestPipeAndSubprocess(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("ok")) {
 		t.Fatalf("exec output = %q", out)
+	}
+}
+
+func TestOverlappedPipeReadWriteAndEOF(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	payload := bytes.Repeat([]byte("pipe payload\n"), 16*1024)
+	writeDone := make(chan error, 1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_, writeErr := io.Copy(writer, bytes.NewReader(payload))
+		closeErr := writer.Close()
+		if writeErr != nil {
+			writeDone <- writeErr
+		} else {
+			writeDone <- closeErr
+		}
+	}()
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("pipe data length = %d, want %d", len(got), len(payload))
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
 	}
 }

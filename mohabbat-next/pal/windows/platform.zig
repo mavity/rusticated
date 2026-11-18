@@ -138,11 +138,24 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
     const s = statePtr();
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
-            op.canceled = true;
+            @atomicStore(bool, &op.canceled, true, .release);
             if (op.kind == .timer) {
                 const gov = op.guest_ov.?;
                 mem.freeOp(s, op);
                 mem.completeInline(gov, pal_abi.ERROR_CANCELED, 0, 0);
+            } else if (op.native_io) {
+                if (mem.findHandle(s, op.handle_token)) |he| {
+                    if (s.p_cancel_io_ex) |cancel| _ = cancel(he.handle, &op.win_ov);
+                    var transferred: u32 = 0;
+                    if (s.p_get_overlapped_result) |get_result| {
+                        _ = get_result(he.handle, &op.win_ov, &transferred, 1);
+                    }
+                }
+            } else if (op.worker_handle != null and op.sock_fd == 0 and
+                (op.kind == .read or op.kind == .write))
+            {
+                if (s.p_cancel_sync_io) |cancel| _ = cancel(op.worker_handle);
+                if (s.p_wait_single) |wait| _ = wait(op.worker_handle, 0xffff_ffff);
             }
             return;
         }
@@ -152,20 +165,45 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
 fn stdHandleReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
     const s = statePtr();
-    const rf = s.p_read_file orelse return 0;
+    const rf = s.p_read_file orelse {
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
+        if (s.p_post_queued) |pq| _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
     const pq = s.p_post_queued orelse return 0;
     var n: u32 = 0;
     const ok = rf(s.stdin_h, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), &n, null);
     if (ok == 0) {
         const err = if (s.p_get_last_error) |gle| gle() else 109;
         if (err == 109 or err == 232) {
-            op.win_ov.internal = 0;
+            op.win_error = 0;
             n = 0;
         } else {
-            op.win_ov.internal = win.mapWinError(err);
+            op.win_error = win.mapWinError(err);
         }
     } else {
-        op.win_ov.internal = 0;
+        op.win_error = 0;
+    }
+    _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
+    return 0;
+}
+
+fn stdHandleWriteWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s = statePtr();
+    const wf = s.p_write_file orelse {
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
+        if (s.p_post_queued) |pq| _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const pq = s.p_post_queued orelse return 0;
+    const h = if (op.handle_token == 1) s.stdout_h else s.stderr_h;
+    var n: u32 = 0;
+    if (wf(h, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), &n, null) == 0) {
+        const err = if (s.p_get_last_error) |gle| gle() else 5;
+        op.win_error = win.mapWinError(err);
+    } else {
+        op.win_error = 0;
     }
     _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
     return 0;
@@ -176,7 +214,7 @@ fn sockRecvWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const s = statePtr();
     const pq = s.p_post_queued orelse return 0;
     const p_recv = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "recv") orelse {
-        op.win_ov.internal = pal_abi.ERROR_UNSUPPORTED;
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
         _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
         return 0;
     };
@@ -184,10 +222,32 @@ fn sockRecvWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const recv_fn: RecvFn = @ptrCast(@alignCast(p_recv));
     const n = recv_fn(op.sock_fd, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), 0);
     if (n < 0) {
-        op.win_ov.internal = pal_abi.ERROR_IO;
+        op.win_error = pal_abi.ERROR_IO;
         _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
     } else {
-        op.win_ov.internal = 0;
+        op.win_error = 0;
+        _ = pq(s.iocp, @intCast(n), @intFromPtr(op), &op.win_ov);
+    }
+    return 0;
+}
+
+fn sockSendWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s = statePtr();
+    const pq = s.p_post_queued orelse return 0;
+    const p_send = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "send") orelse {
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const SendFn = *const fn (usize, [*]const u8, i32, i32) callconv(win.win_cc) i32;
+    const send_fn: SendFn = @ptrCast(@alignCast(p_send));
+    const n = send_fn(op.sock_fd, @ptrCast(op.buf.?), @intCast(@min(op.len, 0x7fff_ffff)), 0);
+    if (n < 0) {
+        op.win_error = pal_abi.ERROR_IO;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+    } else {
+        op.win_error = 0;
         _ = pq(s.iocp, @intCast(n), @intFromPtr(op), &op.win_ov);
     }
     return 0;
@@ -212,7 +272,7 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         if (s.p_create_thread) |ct| {
             const th = ct(null, 0, stdHandleReadWorker, op, 0, null);
             if (th != null) {
-                if (s.p_close_handle) |ch| _ = ch(th);
+                op.worker_handle = th;
                 return;
             }
         }
@@ -229,11 +289,11 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     }
+    if (len == 0) {
+        mem.completeInline(ov, 0, 0, 0);
+        return;
+    }
     if (he.is_socket) {
-        if (len == 0) {
-            mem.completeInline(ov, 0, 0, 0);
-            return;
-        }
         const op = mem.allocOp(s) orelse {
             mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
@@ -246,7 +306,7 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         if (s.p_create_thread) |ct| {
             const th = ct(null, 0, sockRecvWorker, op, 0, null);
             if (th != null) {
-                if (s.p_close_handle) |ch| _ = ch(th);
+                op.worker_handle = th;
                 return;
             }
         }
@@ -255,61 +315,81 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         return;
     }
 
+    if (!he.is_overlapped) {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    }
     const rf = s.p_read_file orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
     };
     const positional = (ov.flags & pal_abi.READ_FLAG_POSITIONAL) != 0;
-    var saved_pos: i64 = 0;
-    if (positional) {
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .read;
+    op.guest_ov = ov;
+    op.handle_token = handle;
+    op.buf = buf;
+    op.len = len;
+    op.native_io = true;
+    if (he.is_pipe) {
+        op.file_offset = 0;
+    } else if (positional) {
         const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
         const off = trailing.*;
         if (off < 0) {
+            mem.freeOp(s, op);
             mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
             return;
         }
-        if (s.p_set_file_pointer_ex) |sfp| {
-            _ = sfp(he.handle, 0, &saved_pos, 1);
-            if (sfp(he.handle, off, null, 0) == 0) {
-                const err = if (s.p_get_last_error) |gle| win.mapWinError(gle()) else pal_abi.ERROR_IO;
-                mem.completeInline(ov, err, 0, 0);
-                return;
-            }
+        op.file_offset = @intCast(off);
+    } else {
+        op.file_offset = he.seq_pos;
+        op.advance_seq = true;
+    }
+    op.win_ov.offset = @truncate(op.file_offset);
+    op.win_ov.offset_high = @truncate(op.file_offset >> 32);
+    if (rf(he.handle, buf, @intCast(@min(len, 0x7fff_ffff)), null, &op.win_ov) == 0) {
+        const err = if (s.p_get_last_error) |gle| gle() else 5;
+        if (err == 38 or err == 109 or err == 232) {
+            mem.freeOp(s, op);
+            mem.completeInline(ov, 0, 0, 0);
+            return;
+        }
+        if (err != 997) {
+            mem.freeOp(s, op);
+            mem.completeInline(ov, win.mapWinError(err), 0, 0);
         }
     }
-    var n: u32 = 0;
-    const ok = rf(he.handle, buf, @intCast(@min(len, 0x7fff_ffff)), &n, null);
-    var out_err: u32 = 0;
-    if (ok == 0) {
-        const gle_code = if (s.p_get_last_error) |gle| gle() else 0;
-        if (gle_code == 38 or gle_code == 109) { // ERROR_HANDLE_EOF / ERROR_BROKEN_PIPE
-            n = 0;
-            out_err = 0;
-        } else {
-            out_err = win.mapWinError(gle_code);
-        }
-    }
-    if (positional) {
-        if (s.p_set_file_pointer_ex) |sfp| _ = sfp(he.handle, saved_pos, null, 0);
-    }
-    mem.completeInline(ov, out_err, 0, n);
 }
 
 fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) callconv(win.win_cc) void {
     const s = statePtr();
     if (handle == 1 or handle == 2) {
-        const h = if (handle == 1) s.stdout_h else s.stderr_h;
-        const wf = s.p_write_file orelse {
-            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
-            return;
-        };
-        var n: u32 = 0;
-        if (wf(h, buf, @intCast(@min(len, 0x7fff_ffff)), &n, null) == 0) {
-            const err = if (s.p_get_last_error) |gle| win.mapWinError(gle()) else pal_abi.ERROR_IO;
-            mem.completeInline(ov, err, 0, 0);
+        if (len == 0) {
+            mem.completeInline(ov, 0, 0, 0);
             return;
         }
-        mem.completeInline(ov, 0, 0, n);
+        const op = mem.allocOp(s) orelse {
+            mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .write;
+        op.guest_ov = ov;
+        op.handle_token = handle;
+        op.buf = @ptrCast(@constCast(buf));
+        op.len = len;
+        if (s.p_create_thread) |ct| {
+            const th = ct(null, 0, stdHandleWriteWorker, op, 0, null);
+            if (th != null) {
+                op.worker_handle = th;
+                return;
+            }
+        }
+        mem.freeOp(s, op);
+        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
         return;
     }
 
@@ -317,42 +397,91 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     };
+    if (len == 0) {
+        mem.completeInline(ov, 0, 0, 0);
+        return;
+    }
     if (!he.is_socket and he.access_mode == 0) {
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     }
     if (he.is_socket) {
-        if (mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "send")) |p_send| {
-            const SendFn = *const fn (usize, [*]const u8, i32, i32) callconv(win.win_cc) i32;
-            const send_fn: SendFn = @ptrCast(@alignCast(p_send));
-            const n = send_fn(@intFromPtr(he.handle), buf, @intCast(@min(len, 0x7fff_ffff)), 0);
-            if (n < 0) {
-                mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            } else {
-                mem.completeInline(ov, 0, 0, @intCast(n));
-            }
+        const op = mem.allocOp(s) orelse {
+            mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
+        };
+        op.kind = .write;
+        op.guest_ov = ov;
+        op.sock_fd = @intFromPtr(he.handle);
+        op.buf = @ptrCast(@constCast(buf));
+        op.len = len;
+        if (s.p_create_thread) |ct| {
+            const th = ct(null, 0, sockSendWorker, op, 0, null);
+            if (th != null) {
+                op.worker_handle = th;
+                return;
+            }
         }
-        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        mem.freeOp(s, op);
+        mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
         return;
     }
 
+    if (!he.is_overlapped) {
+        mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+        return;
+    }
     const wf = s.p_write_file orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
     };
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .write;
+    op.guest_ov = ov;
+    op.handle_token = handle;
+    op.buf = @ptrCast(@constCast(buf));
+    op.len = len;
+    op.native_io = true;
+    if (he.is_pipe) {
+        op.file_offset = 0;
+    } else {
+        op.file_offset = he.seq_pos;
+        op.advance_seq = true;
+    }
     if (he.append_mode) {
-        if (s.p_set_file_pointer_ex) |sfp| {
-            _ = sfp(he.handle, 0, null, 2); // FILE_END
+        const get_size = s.p_get_file_size_ex orelse {
+            mem.freeOp(s, op);
+            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+            return;
+        };
+        var append_offset: i64 = 0;
+        if (get_size(he.handle, &append_offset) == 0) {
+            mem.freeOp(s, op);
+            const gle = s.p_get_last_error orelse {
+                mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
+                return;
+            };
+            mem.completeInline(ov, win.mapWinError(gle()), 0, 0);
+            return;
+        }
+        op.file_offset = @intCast(@max(append_offset, 0));
+        op.append_write = true;
+        op.win_ov.offset = 0xffff_ffff;
+        op.win_ov.offset_high = 0xffff_ffff;
+    } else {
+        op.win_ov.offset = @truncate(op.file_offset);
+        op.win_ov.offset_high = @truncate(op.file_offset >> 32);
+    }
+    if (wf(he.handle, buf, @intCast(@min(len, 0x7fff_ffff)), null, &op.win_ov) == 0) {
+        const err = if (s.p_get_last_error) |gle| gle() else 5;
+        if (err != 997) {
+            mem.freeOp(s, op);
+            mem.completeInline(ov, win.mapWinError(err), 0, 0);
         }
     }
-    var n: u32 = 0;
-    if (wf(he.handle, buf, @intCast(@min(len, 0x7fff_ffff)), &n, null) == 0) {
-        const err = if (s.p_get_last_error) |gle| win.mapWinError(gle()) else pal_abi.ERROR_IO;
-        mem.completeInline(ov, err, 0, 0);
-        return;
-    }
-    mem.completeInline(ov, 0, 0, n);
 }
 
 fn abiSeek(ov: *pal_abi.Overlapped, handle: u64, off: i64, whence: u32) callconv(win.win_cc) void {
@@ -506,6 +635,12 @@ fn initKernel32(s: *PalState) bool {
     s.p_virtual_free = @ptrCast(@alignCast(mem.resolveKernel32(s, "VirtualFree") orelse return false));
     s.p_close_handle = @ptrCast(@alignCast(mem.resolveKernel32(s, "CloseHandle") orelse return false));
     s.p_create_file_w = @ptrCast(@alignCast(mem.resolveKernel32(s, "CreateFileW") orelse return false));
+    s.p_create_named_pipe_w = @ptrCast(@alignCast(mem.resolveKernel32(s, "CreateNamedPipeW") orelse return false));
+    s.p_connect_named_pipe = @ptrCast(@alignCast(mem.resolveKernel32(s, "ConnectNamedPipe") orelse return false));
+    s.p_cancel_io_ex = @ptrCast(@alignCast(mem.resolveKernel32(s, "CancelIoEx") orelse return false));
+    s.p_get_overlapped_result = @ptrCast(@alignCast(mem.resolveKernel32(s, "GetOverlappedResult") orelse return false));
+    s.p_cancel_sync_io = @ptrCast(@alignCast(mem.resolveKernel32(s, "CancelSynchronousIo") orelse return false));
+    s.p_wait_single = @ptrCast(@alignCast(mem.resolveKernel32(s, "WaitForSingleObject") orelse return false));
     s.p_set_file_pointer_ex = @ptrCast(@alignCast(mem.resolveKernel32(s, "SetFilePointerEx") orelse return false));
     s.p_set_end_of_file = @ptrCast(@alignCast(mem.resolveKernel32(s, "SetEndOfFile") orelse return false));
     s.p_get_file_size_ex = @ptrCast(@alignCast(mem.resolveKernel32(s, "GetFileSizeEx") orelse return false));
@@ -632,31 +767,74 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
         var removed: u32 = 0;
         if (s.p_get_queued_ex.?(s.iocp, &entries, entries.len, &removed, timeout_ms, 0) != 0) {
             for (entries[0..removed]) |e| {
-                if (e.completion_key != 0) {
-                    const op: *mem.PendingOp = @ptrFromInt(e.completion_key);
-                    if (op.used) {
-                        const gov = op.guest_ov.?;
-                        const canceled = op.canceled;
-                        const kind = op.kind;
-                        const raw_err: u32 = @intCast(op.win_ov.internal);
-                        const raw_sock = op.win_ov.internal_high;
-                        mem.freeOp(s, op);
-                        if (canceled) {
-                            mem.completeInline(gov, pal_abi.ERROR_CANCELED, 0, 0);
-                        } else if (kind == .accept) {
-                            if (raw_err != 0) {
-                                mem.completeInline(gov, raw_err, 0, 0);
-                            } else if (mem.allocHandle(s)) |cli_he| {
-                                cli_he.handle = @ptrFromInt(raw_sock);
-                                cli_he.is_socket = true;
-                                mem.completeInline(gov, 0, 0, cli_he.token);
+                const win_ov = e.overlapped orelse continue;
+                const op: *mem.PendingOp = @fieldParentPtr("win_ov", win_ov);
+                if (!op.used) continue;
+
+                var transferred = e.bytes_transferred;
+                if (op.native_io) {
+                    if (mem.findHandle(s, op.handle_token)) |he| {
+                        var actual: u32 = 0;
+                        if (s.p_get_overlapped_result.?(he.handle, &op.win_ov, &actual, 0) != 0) {
+                            op.win_error = 0;
+                            transferred = actual;
+                        } else {
+                            const err = s.p_get_last_error.?();
+                            if (op.kind == .read and (err == 38 or err == 109 or err == 232)) {
+                                op.win_error = 0;
+                                transferred = 0;
                             } else {
-                                mem.completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
+                                op.win_error = win.mapWinError(err);
+                            }
+                        }
+                    } else {
+                        op.win_error = pal_abi.ERROR_BADF;
+                    }
+                }
+
+                const canceled = @atomicLoad(bool, &op.canceled, .acquire);
+                const kind = op.kind;
+                const guest_ov = op.guest_ov;
+                const raw_sock = op.win_ov.internal_high;
+                const worker_handle = op.worker_handle;
+                if (op.advance_seq) {
+                    if (mem.findHandle(s, op.handle_token)) |he| {
+                        if (op.append_write and op.win_error == 0) {
+                            var end_offset: i64 = 0;
+                            if (s.p_get_file_size_ex.?(he.handle, &end_offset) == 0) {
+                                op.win_error = win.mapWinError(s.p_get_last_error.?());
+                            } else {
+                                he.seq_pos = @intCast(@max(end_offset, 0));
                             }
                         } else {
-                            mem.completeInline(gov, raw_err, 0, e.bytes_transferred);
+                            he.seq_pos = op.file_offset + transferred;
                         }
                     }
+                }
+                const completion_error = if (kind == .accept)
+                    @as(u32, @intCast(op.win_ov.internal))
+                else
+                    op.win_error;
+                const result_ext = if (kind == .proc_wait) op.win_ov.internal_high else transferred;
+                mem.freeOp(s, op);
+                if (worker_handle != null) {
+                    if (s.p_close_handle) |ch| _ = ch(worker_handle);
+                }
+
+                if (canceled or guest_ov == null or kind == .pipe_connect) continue;
+                const gov = guest_ov.?;
+                if (kind == .accept) {
+                    if (completion_error != 0) {
+                        mem.completeInline(gov, completion_error, 0, 0);
+                    } else if (mem.allocHandle(s)) |cli_he| {
+                        cli_he.handle = @ptrFromInt(raw_sock);
+                        cli_he.is_socket = true;
+                        mem.completeInline(gov, 0, 0, cli_he.token);
+                    } else {
+                        mem.completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
+                    }
+                } else {
+                    mem.completeInline(gov, completion_error, 0, result_ext);
                 }
             }
         }
