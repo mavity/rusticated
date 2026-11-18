@@ -22,7 +22,6 @@ SECTIONS
         *(.eh_frame*)
         *(.note*)
         *(.data .data.*)
-        *(.bss .bss.*)
         *(.got .got.*)
         *(.plt .plt.*)
         *(COMMON)
