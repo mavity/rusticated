@@ -161,6 +161,14 @@ func (h *HostEnv) resolveGuestPathForHost(p string) string {
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p)
 	}
+	if runtime.GOOS == "windows" && len(p) > 0 {
+		if p[0] == '\\' || p[0] == '/' {
+			base := h.currentCwd()
+			if volume := filepath.VolumeName(base); volume != "" {
+				return filepath.Clean(volume + string(filepath.Separator) + p[1:])
+			}
+		}
+	}
 	base := h.currentCwd()
 	if base == "" {
 		base = "/"

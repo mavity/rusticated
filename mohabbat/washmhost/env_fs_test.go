@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mavity/rusticated/platform"
 )
 
 func TestResolveGuestDriveRootedPathDoesNotPrefixCwd(t *testing.T) {
@@ -20,13 +22,30 @@ func TestResolveGuestDriveRootedPathDoesNotPrefixCwd(t *testing.T) {
 	cwd := filepath.Clean(`C:\workspace`)
 	want := filepath.Clean(`C:\Users\test\project`)
 	env := &HostEnv{cwd: cwd}
-	for _, input := range []string{
-		`C:\Users\test\project`,
-		`C:\Users\test\project\.`,
-	} {
-		if got := env.resolveGuestPathForHost(input); got != want {
-			t.Errorf("resolveGuestPathForHost(%q) = %q, want %q", input, got, want)
-		}
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"01_drive_backslashes", `C:\Users\test\project`, want},
+		{"02_drive_dot_segment", `C:\Users\test\project\.`, want},
+		{"03_drive_slashes", `C:/Users/test/project`, filepath.Clean(`C:/Users/test/project`)},
+		{"04_root_relative_backslash", `\Users\test\project`, filepath.Clean(`C:\Users\test\project`)},
+		{"05_root_relative_slash", `/Users/test/project`, filepath.Clean(`C:\Users\test\project`)},
+		{"06_relative_join", `project`, filepath.Clean(`C:\workspace\project`)},
+		{"07_dot_relative", `.`, filepath.Clean(`C:\workspace`)},
+		{"08_empty_uses_cwd", "", filepath.Clean(cwd)},
+		{"09_unc_share", `\\server\share\project`, filepath.Clean(`\\server\share\project`)},
+		{"10_drive_dotdot", `C:\Users\test\project\..\project`, want},
+		{"11_lowercase_drive", `c:\Users\test\project`, filepath.Clean(`c:\Users\test\project`)},
+		{"12_slash_root_no_cwd_prefix", `/workspace/file`, filepath.Clean(`C:\workspace/file`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := env.resolveGuestPathForHost(tc.input); got != tc.want {
+				t.Errorf("resolveGuestPathForHost(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -75,6 +94,93 @@ func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(data[platformInfoSystemContextVersionOffset:]); got != 1 {
 		t.Errorf("system context version = %d, want 1", got)
 	}
+
+	t.Run("01_success_status", func(t *testing.T) {
+		again := newMockModule(0x10000)
+		check := []uint64{uint64(ptr), platformInfoSize}
+		env.sys_get_platform_info(context.Background(), again, check)
+		if check[0] != uint64(wasiSuccess) {
+			t.Errorf("repeat platform info result = %d, want success", check[0])
+		}
+	})
+	t.Run("02_flags_shape", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[0:4]); runtime.GOOS != "windows" && got&1 == 0 {
+			t.Errorf("case-sensitive flag = %d, want set", got)
+		}
+	})
+	t.Run("03_path_separator", func(t *testing.T) {
+		want := byte('/')
+		if runtime.GOOS == "windows" {
+			want = '\\'
+		}
+		if got := data[4]; got != want {
+			t.Errorf("path separator = %q, want %q", got, want)
+		}
+	})
+	t.Run("04_list_separator", func(t *testing.T) {
+		want := byte(':')
+		if runtime.GOOS == "windows" {
+			want = ';'
+		}
+		if got := data[5]; got != want {
+			t.Errorf("list separator = %q, want %q", got, want)
+		}
+	})
+	t.Run("05_os_kind", func(t *testing.T) {
+		want := map[string]uint16{"windows": 1, "linux": 2, "darwin": 3}[runtime.GOOS]
+		if want == 0 {
+			want = 4
+		}
+		if got := binary.LittleEndian.Uint16(data[6:8]); got != want {
+			t.Errorf("OS kind = %d, want %d", got, want)
+		}
+	})
+	t.Run("06_cpu_type", func(t *testing.T) {
+		got := binary.LittleEndian.Uint16(data[16:18])
+		if got == 0 {
+			t.Error("CPU type is zero")
+		}
+	})
+	t.Run("07_cpu_bitness", func(t *testing.T) {
+		want := byte(64)
+		if runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
+			want = 32
+		}
+		if got := data[18]; got != want {
+			t.Errorf("CPU bitness = %d, want %d", got, want)
+		}
+	})
+	t.Run("08_struct_size", func(t *testing.T) {
+		if platformInfoSize != 1264 {
+			t.Errorf("platform info size = %d, want 1264", platformInfoSize)
+		}
+	})
+	t.Run("09_home_canonical", func(t *testing.T) {
+		if got := readString(548); got != wantHome {
+			t.Errorf("platform home = %q, want %q", got, wantHome)
+		}
+	})
+	t.Run("10_temp_canonical", func(t *testing.T) {
+		if got := readString(612); got != wantTemp {
+			t.Errorf("platform temp = %q, want %q", got, wantTemp)
+		}
+	})
+	t.Run("11_small_buffer", func(t *testing.T) {
+		small := newMockModule(0x10000)
+		stack := []uint64{uint64(0x100), uint64(platformInfoSize - 1)}
+		env.sys_get_platform_info(context.Background(), small, stack)
+		if stack[0] != uint64(wasiE2BIG) {
+			t.Errorf("small buffer result = %d, want E2BIG", stack[0])
+		}
+	})
+	t.Run("12_invalid_output_pointer", func(t *testing.T) {
+		small := newMockModule(32)
+		stack := []uint64{uint64(32), uint64(platformInfoSize)}
+		env.sys_get_platform_info(context.Background(), small, stack)
+		if stack[0] != uint64(wasiEFAULT) {
+			t.Errorf("invalid pointer result = %d, want EFAULT", stack[0])
+		}
+	})
 }
 
 func TestSysGetPlatformInfoSerializesSystemContext(t *testing.T) {
@@ -114,6 +220,92 @@ func TestSysGetPlatformInfoSerializesSystemContext(t *testing.T) {
 			t.Errorf("system context at %d = %q, want %q", field.offset, got, field.want)
 		}
 	}
+	t.Run("01_locale", func(t *testing.T) {
+		if got := string(data[940:945]); got != "en-GB" {
+			t.Errorf("locale = %q", got)
+		}
+	})
+	t.Run("02_timezone", func(t *testing.T) {
+		if got := string(data[1004:1017]); got != "Europe/London" {
+			t.Errorf("timezone = %q", got)
+		}
+	})
+	t.Run("03_layout", func(t *testing.T) {
+		if got := string(data[1068:1091]); got != "com.apple.keylayout.ABC" {
+			t.Errorf("layout = %q", got)
+		}
+	})
+	t.Run("04_appearance", func(t *testing.T) {
+		if got := string(data[1196:1200]); got != "dark" {
+			t.Errorf("appearance = %q", got)
+		}
+	})
+	t.Run("05_power", func(t *testing.T) {
+		if got := string(data[1228:1235]); got != "battery" {
+			t.Errorf("power = %q", got)
+		}
+	})
+	t.Run("06_version", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[936:940]); got != 1 {
+			t.Errorf("context version = %d", got)
+		}
+	})
+	t.Run("07_locale_null_after_text", func(t *testing.T) {
+		if got := data[945]; got != 0 {
+			t.Errorf("locale terminator = %d", got)
+		}
+	})
+	t.Run("08_timezone_null_after_text", func(t *testing.T) {
+		if got := data[1017]; got != 0 {
+			t.Errorf("timezone terminator = %d", got)
+		}
+	})
+	t.Run("09_layout_null_after_text", func(t *testing.T) {
+		if got := data[1091]; got != 0 {
+			t.Errorf("layout terminator = %d", got)
+		}
+	})
+	t.Run("10_appearance_null_after_text", func(t *testing.T) {
+		if got := data[1200]; got != 0 {
+			t.Errorf("appearance terminator = %d", got)
+		}
+	})
+	t.Run("11_power_null_after_text", func(t *testing.T) {
+		if got := data[1235]; got != 0 {
+			t.Errorf("power terminator = %d", got)
+		}
+	})
+	t.Run("12_utf8_context_safe", func(t *testing.T) {
+		env.systemInfoProvider = func() systemContext {
+			return systemContext{locale: "fr-FR", timeZone: "Europe/Paris", keyboardLayoutID: "é", appearance: "light", powerSource: "AC"}
+		}
+		again := newMockModule(0x10000)
+		stack := []uint64{uint64(ptr), platformInfoSize}
+		env.sys_get_platform_info(context.Background(), again, stack)
+		if stack[0] != 0 {
+			t.Errorf("UTF-8 context result = %d", stack[0])
+		}
+	})
+}
+
+func TestCurrentHostSystemContextIgnoresInventedEnvVars(t *testing.T) {
+	t.Setenv("MOHABBAT_SYSTEM_APPEARANCE", "sentinel-appearance")
+	t.Setenv("GTK_THEME", "sentinel-gtk-theme")
+	t.Setenv("MOHABBAT_SYSTEM_POWER_SOURCE", "sentinel-power")
+	t.Setenv("MOHABBAT_POWER_SOURCE", "sentinel-power-2")
+	t.Setenv("MOHABBAT_KEYBOARD_LAYOUT", "sentinel-layout")
+	t.Setenv("XKB_DEFAULT_LAYOUT", "sentinel-xkb")
+
+	got := currentHostSystemContext()
+	if got.appearance != strings.TrimSpace(platform.SystemAppearance()) {
+		t.Fatalf("appearance = %q, want %q", got.appearance, strings.TrimSpace(platform.SystemAppearance()))
+	}
+	if got.powerSource != strings.TrimSpace(platform.PowerSource()) {
+		t.Fatalf("powerSource = %q, want %q", got.powerSource, strings.TrimSpace(platform.PowerSource()))
+	}
+	if got.keyboardLayoutID != strings.TrimSpace(platform.KeyboardLayoutID()) {
+		t.Fatalf("keyboardLayoutID = %q, want %q", got.keyboardLayoutID, strings.TrimSpace(platform.KeyboardLayoutID()))
+	}
 }
 
 func TestSystemInfoWaitCompletesWhenContextChanges(t *testing.T) {
@@ -144,6 +336,107 @@ func TestSystemInfoWaitCompletesWhenContextChanges(t *testing.T) {
 	if got := env.PendingOps(); got != 0 {
 		t.Errorf("pending operations = %d, want 0", got)
 	}
+	t.Run("01_wait_registered", func(t *testing.T) {
+		env2 := NewHostEnv()
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x200})
+		env2.mu.Lock()
+		_, ok := env2.systemInfoWaiters[0x200]
+		env2.mu.Unlock()
+		if !ok {
+			t.Error("waiter was not registered")
+		}
+	})
+	t.Run("02_context_change_locale", func(t *testing.T) {
+		if current.locale != "fr-FR" {
+			t.Errorf("locale = %q", current.locale)
+		}
+	})
+	t.Run("03_overlapped_completed", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[4:8]); got != wasiSuccess {
+			t.Errorf("error = %d", got)
+		}
+	})
+	t.Run("04_flags_completed", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[0:4]); got != 1 {
+			t.Errorf("flags = %d", got)
+		}
+	})
+	t.Run("05_waiter_removed", func(t *testing.T) {
+		env.mu.Lock()
+		_, ok := env.systemInfoWaiters[ovPtr]
+		env.mu.Unlock()
+		if ok {
+			t.Error("waiter remains after change")
+		}
+	})
+	t.Run("06_active_removed", func(t *testing.T) {
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending = %d", got)
+		}
+	})
+	t.Run("07_timer_cleared", func(t *testing.T) {
+		env.mu.Lock()
+		timer := env.systemInfoTimer
+		env.mu.Unlock()
+		if timer != nil {
+			t.Error("timer remains after completion")
+		}
+	})
+	t.Run("08_generation_valid", func(t *testing.T) {
+		env.mu.Lock()
+		got := env.systemInfoTimerGeneration
+		env.mu.Unlock()
+		if got == 0 {
+			t.Error("generation is zero")
+		}
+	})
+	t.Run("09_context_snapshot", func(t *testing.T) {
+		env.mu.Lock()
+		got := env.systemInfoSnapshot.locale
+		env.mu.Unlock()
+		if got != "fr-FR" {
+			t.Errorf("snapshot locale = %q", got)
+		}
+	})
+	t.Run("10_repeat_change", func(t *testing.T) {
+		env2 := NewHostEnv()
+		env2.systemInfoProvider = func() systemContext { return systemContext{locale: "de-DE"} }
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x300})
+		env2.CancelOp(0x300)
+		if env2.PendingOps() != 0 {
+			t.Error("repeat wait cancellation left pending operation")
+		}
+	})
+	t.Run("11_invalid_provider_still_waits", func(t *testing.T) {
+		env2 := NewHostEnv()
+		env2.systemInfoProvider = nil
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x400})
+		if env2.PendingOps() == 0 {
+			t.Error("default-provider wait did not register")
+		}
+		env2.CancelOp(0x400)
+	})
+	t.Run("12_context_equal_no_completion", func(t *testing.T) {
+		env2 := NewHostEnv()
+		ctx := systemContext{locale: "en-US"}
+		env2.systemInfoProvider = func() systemContext { return ctx }
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x500})
+		env2.mu.Lock()
+		generation := env2.systemInfoTimerGeneration
+		env2.mu.Unlock()
+		env2.pollSystemInfo(generation)
+		env2.mu.Lock()
+		_, waiting := env2.systemInfoWaiters[0x500]
+		env2.mu.Unlock()
+		if !waiting {
+			t.Error("equal context removed waiter")
+		}
+		env2.CancelOp(0x500)
+	})
 }
 
 func TestCancelSystemInfoWaitRemovesWaiterAndTimer(t *testing.T) {
@@ -172,6 +465,112 @@ func TestCancelSystemInfoWaitRemovesWaiterAndTimer(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(data[4:8]); got != wasiECANCELED {
 		t.Errorf("system info wait error = %d, want canceled", got)
 	}
+	t.Run("01_waiter_registered_before_cancel", func(t *testing.T) {
+		env2 := NewHostEnv()
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x200})
+		env2.mu.Lock()
+		_, ok := env2.systemInfoWaiters[0x200]
+		env2.mu.Unlock()
+		if !ok {
+			t.Error("waiter missing before cancel")
+		}
+		env2.CancelOp(0x200)
+	})
+	t.Run("02_waiter_removed", func(t *testing.T) {
+		env.mu.Lock()
+		_, ok := env.systemInfoWaiters[ovPtr]
+		env.mu.Unlock()
+		if ok {
+			t.Error("waiter remains")
+		}
+	})
+	t.Run("03_timer_removed", func(t *testing.T) {
+		env.mu.Lock()
+		timer := env.systemInfoTimer
+		env.mu.Unlock()
+		if timer != nil {
+			t.Error("timer remains")
+		}
+	})
+	t.Run("04_active_removed", func(t *testing.T) {
+		env.mu.Lock()
+		_, ok := env.activeOps[ovPtr]
+		env.mu.Unlock()
+		if ok {
+			t.Error("active operation remains")
+		}
+	})
+	t.Run("05_pending_zero", func(t *testing.T) {
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending = %d", got)
+		}
+	})
+	t.Run("06_canceled_error", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[4:8]); got != wasiECANCELED {
+			t.Errorf("error = %d", got)
+		}
+	})
+	t.Run("07_completed_flag", func(t *testing.T) {
+		if got := binary.LittleEndian.Uint32(data[0:4]); got != 1 {
+			t.Errorf("flags = %d", got)
+		}
+	})
+	t.Run("08_idempotent_second_cancel", func(t *testing.T) {
+		env.CancelOp(ovPtr)
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending = %d", got)
+		}
+	})
+	t.Run("09_cancel_other_waiter_keeps_shared_timer", func(t *testing.T) {
+		env2 := NewHostEnv()
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x300})
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x301})
+		env2.CancelOp(0x300)
+		env2.mu.Lock()
+		timer := env2.systemInfoTimer
+		_, remaining := env2.systemInfoWaiters[0x301]
+		env2.mu.Unlock()
+		if timer == nil || !remaining {
+			t.Error("shared waiter/timer cleanup incorrect")
+		}
+		env2.CancelOp(0x301)
+	})
+	t.Run("10_last_cancel_stops_timer", func(t *testing.T) {
+		env2 := NewHostEnv()
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x400})
+		env2.CancelOp(0x400)
+		env2.mu.Lock()
+		timer := env2.systemInfoTimer
+		env2.mu.Unlock()
+		if timer != nil {
+			t.Error("last cancel left timer")
+		}
+	})
+	t.Run("11_cancel_invalid_pointer_safe", func(t *testing.T) {
+		env2 := NewHostEnv()
+		env2.CancelOp(0xffffffff)
+		if got := env2.PendingOps(); got != 0 {
+			t.Errorf("pending = %d", got)
+		}
+	})
+	t.Run("12_generation_advanced", func(t *testing.T) {
+		env2 := NewHostEnv()
+		mod2 := newMockModule(0x10000)
+		env2.sys_system_info_wait(context.Background(), mod2, []uint64{0x500})
+		env2.mu.Lock()
+		before := env2.systemInfoTimerGeneration
+		env2.mu.Unlock()
+		env2.CancelOp(0x500)
+		env2.mu.Lock()
+		after := env2.systemInfoTimerGeneration
+		env2.mu.Unlock()
+		if after <= before {
+			t.Errorf("generation not advanced: before=%d after=%d", before, after)
+		}
+	})
 }
 
 func TestSysFs(t *testing.T) {

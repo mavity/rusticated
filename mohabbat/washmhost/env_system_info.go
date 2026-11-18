@@ -45,7 +45,9 @@ func currentHostSystemContext() systemContext {
 	return systemContext{
 		locale:           locale,
 		timeZone:         timeZone,
-		keyboardLayoutID: platform.KeyboardLayoutID(),
+		keyboardLayoutID: strings.TrimSpace(platform.KeyboardLayoutID()),
+		appearance:       strings.TrimSpace(platform.SystemAppearance()),
+		powerSource:      strings.TrimSpace(platform.PowerSource()),
 	}
 }
 

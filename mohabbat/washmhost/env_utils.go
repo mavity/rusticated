@@ -291,7 +291,7 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 
 	structSize := uint32(platformInfoSize)
 	if maxLen < structSize {
-		stack[0] = 7 // E2BIG
+		stack[0] = uint64(wasiE2BIG)
 		return
 	}
 
@@ -369,11 +369,11 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 
 	hostHome, err := os.UserHomeDir()
 	if err == nil && hostHome != "" {
-		copySafe(548, filepath.Clean(hostHome))
+		copySystemInfoString(buf, 548, 64, filepath.Clean(hostHome))
 	}
 	hostTempDir := os.TempDir()
 	if hostTempDir != "" {
-		copySafe(612, filepath.Clean(hostTempDir))
+		copySystemInfoString(buf, 612, 64, filepath.Clean(hostTempDir))
 	}
 
 	for i, slot := range hostPlatformMemorySlots() {
