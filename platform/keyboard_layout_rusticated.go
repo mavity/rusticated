@@ -24,3 +24,17 @@ func SystemTimeZone() string {
 	}
 	return ""
 }
+
+func SystemAppearance() string {
+	if info := syscall.GetPlatformInfo(); info != nil {
+		return info.Appearance
+	}
+	return ""
+}
+
+func PowerSource() string {
+	if info := syscall.GetPlatformInfo(); info != nil {
+		return info.PowerSource
+	}
+	return ""
+}

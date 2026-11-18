@@ -15,6 +15,16 @@ func TestValidateNativeAbiOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("exact guest runtime environment output", func(t *testing.T) {
+		output := strings.Join(nativeAbiExpectedPasses["TestGuestRuntimeEnvOmitsCwdValues"], "\n")
+		for _, name := range nativeAbiExpectedPasses["TestGuestRuntimeEnvOmitsCwdValues"] {
+			output = strings.ReplaceAll(output, name, "PASS "+name)
+		}
+		if err := validateNativeAbiOutput("TestGuestRuntimeEnvOmitsCwdValues", []byte(output)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("missing case", func(t *testing.T) {
 		err := validateNativeAbiOutput("lifecycle_std_write", nil)
 		if err == nil || !strings.Contains(err.Error(), "missing=") {
