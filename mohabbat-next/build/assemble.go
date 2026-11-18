@@ -84,6 +84,8 @@ type AssemblyAssets struct {
 	HelloAarch64           string
 	FileIoX86_64           string
 	FileIoAarch64          string
+	AbiConformanceX86_64   string
+	AbiConformanceAarch64  string
 	BrainWasm              string
 }
 
@@ -105,6 +107,8 @@ func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
 		{name: "hello-aarch64", path: assets.HelloAarch64},
 		{name: "fileio-x86_64", path: assets.FileIoX86_64},
 		{name: "fileio-aarch64", path: assets.FileIoAarch64},
+		{name: "abi-conformance-x86_64", path: assets.AbiConformanceX86_64},
+		{name: "abi-conformance-aarch64", path: assets.AbiConformanceAarch64},
 	}
 	if assets.BrainWasm != "" {
 		items = append(items, poolItem{name: "brain.wasm", path: assets.BrainWasm})

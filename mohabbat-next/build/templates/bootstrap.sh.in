@@ -36,6 +36,12 @@ run() {
         cd -- "$2"
         mode="fileio"
         shift 2
+    elif [ "${1:-}" = "--abi-test" ]; then
+        [ "$#" -ge 3 ] || { echo "Missing ABI test directory or suite." >&2; exit 2; }
+        [ -d "$2" ] || { echo "ABI test directory does not exist: $2" >&2; exit 2; }
+        cd -- "$2"
+        mode="abi"
+        shift 2
     fi
 
     tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"

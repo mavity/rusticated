@@ -187,6 +187,28 @@ func main() {
 			MaxSize:      64 * 1024,
 			OutFileName:  "hello-fileio-aarch64",
 		},
+		{
+			Name:         "payload-abi-x86_64",
+			RootFile:     filepath.Join(nextDir, "payload", "abi_conformance.zig"),
+			Deps:         []ZigDep{palAbiDep},
+			Arch:         "x86_64",
+			Optimize:     "ReleaseSmall",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
+			MaxSize:      64 * 1024,
+			OutFileName:  "abi-conformance-x86_64",
+		},
+		{
+			Name:         "payload-abi-aarch64",
+			RootFile:     filepath.Join(nextDir, "payload", "abi_conformance.zig"),
+			Deps:         []ZigDep{palAbiDep},
+			Arch:         "aarch64",
+			Optimize:     "ReleaseSmall",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
+			MaxSize:      64 * 1024,
+			OutFileName:  "abi-conformance-aarch64",
+		},
 		// Movable zwasm Runtime Slice (ISA-shared)
 		{
 			Name:         "runtime-x86_64",
@@ -441,6 +463,8 @@ func main() {
 		HelloAarch64:           builtBins["hello-aarch64"],
 		FileIoX86_64:           builtBins["hello-fileio-x86_64"],
 		FileIoAarch64:          builtBins["hello-fileio-aarch64"],
+		AbiConformanceX86_64:   builtBins["abi-conformance-x86_64"],
+		AbiConformanceAarch64:  builtBins["abi-conformance-aarch64"],
 		BrainWasm:              brainWasmPath,
 	}
 

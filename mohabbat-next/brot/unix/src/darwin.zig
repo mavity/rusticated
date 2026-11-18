@@ -154,6 +154,8 @@ pub fn runMain(argv: []const [*:0]const u8) noreturn {
         (if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64")
     else if (std.mem.eql(u8, mode, "fileio"))
         (if (builtin.cpu.arch == .x86_64) "fileio-x86_64" else "fileio-aarch64")
+    else if (std.mem.eql(u8, mode, "abi"))
+        (if (builtin.cpu.arch == .x86_64) "abi-conformance-x86_64" else "abi-conformance-aarch64")
     else
         (if (builtin.cpu.arch == .x86_64) "hello-x86_64" else "hello-aarch64");
     const payload_slice = pool.findEntry(raw_pool, payload_name) orelse die("brot: payload not found in pool\n", 22);

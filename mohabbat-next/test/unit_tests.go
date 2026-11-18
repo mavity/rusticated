@@ -35,8 +35,8 @@ func (r *Runner) RunStage2UnitTests() {
 		return cmd.Run()
 	})
 
-	r.RunTest("unit/zig", "payload/hello.zig & fileio.zig", func() error {
-		for _, f := range []string{"hello.zig", "fileio.zig"} {
+	r.RunTest("unit/zig", "payload/hello.zig, fileio.zig & abi_conformance.zig", func() error {
+		for _, f := range []string{"hello.zig", "fileio.zig", "abi_conformance.zig"} {
 			cmd := exec.Command("zig", "test", "--dep", "pal_abi", "-Mroot="+filepath.Join(r.NextDir, "payload", f), "-Mpal_abi="+palAbi)
 			cmd.Dir = r.NextDir
 			cmd.Stdout = os.Stdout

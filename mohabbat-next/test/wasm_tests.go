@@ -37,7 +37,8 @@ func discoverWasmTestTargets(repoRoot string) ([]wasmTestTarget, error) {
 	}
 
 	var targets []wasmTestTarget
-	seenDirs := make(map[string]bool)
+	seenGoDirs := make(map[string]bool)
+	seenRustDirs := make(map[string]bool)
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -63,12 +64,11 @@ func discoverWasmTestTargets(repoRoot string) ([]wasmTestTarget, error) {
 			}
 
 			dir := filepath.Dir(path)
-			if seenDirs[dir] {
-				return nil
-			}
-
 			if strings.HasSuffix(d.Name(), "_test.go") {
-				seenDirs[dir] = true
+				if seenGoDirs[dir] {
+					return nil
+				}
+				seenGoDirs[dir] = true
 				rel, _ := filepath.Rel(repoRoot, dir)
 				targets = append(targets, wasmTestTarget{
 					Project: name,
@@ -79,8 +79,12 @@ func discoverWasmTestTargets(repoRoot string) ([]wasmTestTarget, error) {
 				return nil
 			}
 
-			if d.Name() == "Cargo.toml" {
-				seenDirs[dir] = true
+			if d.Name() == "Cargo.toml" && !seenRustDirs[dir] {
+				// Skip Cargo.toml in directories that are Go modules (e.g. dload/)
+				if _, goModErr := os.Stat(filepath.Join(dir, "go.mod")); goModErr == nil {
+					return nil
+				}
+				seenRustDirs[dir] = true
 				rel, _ := filepath.Rel(repoRoot, dir)
 				targets = append(targets, wasmTestTarget{
 					Project: name,
@@ -94,6 +98,17 @@ func discoverWasmTestTargets(repoRoot string) ([]wasmTestTarget, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Include mohabbat-next/wasm-abi-test if present
+	wasmAbiDir := filepath.Join(repoRoot, "mohabbat-next", "wasm-abi-test")
+	if info, statErr := os.Stat(wasmAbiDir); statErr == nil && info.IsDir() {
+		targets = append(targets, wasmTestTarget{
+			Project: "wasm-abi-test",
+			PkgRel:  "mohabbat-next/wasm-abi-test",
+			Kind:    "go",
+			Dir:     wasmAbiDir,
+		})
 	}
 
 	return targets, nil

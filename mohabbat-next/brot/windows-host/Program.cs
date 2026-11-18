@@ -96,6 +96,7 @@ internal static class Program
                 args.Length == 3 ? args[2] : "load-add-store");
         }
         bool fileIoTest = args.Length >= 2 && args[0] == "--file-io-test";
+        bool abiTest = args.Length >= 3 && args[0] == "--abi-test";
         string overrideWasmPath = null;
         int guestArgStart = 0;
         if (args.Length >= 2 && args[0] == "--wasm")
@@ -108,7 +109,7 @@ internal static class Program
             }
         }
         bool hasBrain = overrideWasmPath != null || TryReadComponent("brain.wasm") != null;
-        if (args.Length != 0 && !fileIoTest && !hasBrain)
+        if (args.Length != 0 && !fileIoTest && !abiTest && !hasBrain)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
             return 2;
@@ -127,18 +128,18 @@ internal static class Program
 
         try
         {
-            if (fileIoTest)
+            if (fileIoTest || abiTest)
             {
                 string workingDirectory = Path.GetFullPath(args[1]);
                 if (!Directory.Exists(workingDirectory))
                 {
-                    Console.Error.WriteLine("File-I/O test directory does not exist: " + workingDirectory);
+                    Console.Error.WriteLine("Test directory does not exist: " + workingDirectory);
                     return 2;
                 }
                 Directory.SetCurrentDirectory(workingDirectory);
             }
             string[] guestArgs;
-            if (fileIoTest)
+            if (fileIoTest || abiTest)
             {
                 guestArgs = new string[args.Length - 2];
                 if (guestArgs.Length != 0)
@@ -174,11 +175,11 @@ internal static class Program
 
             string architecture = GetArchitecture();
             byte[] platform = ReadComponent("platform-windows-" + architecture);
-            bool useBrain = hasBrain && !fileIoTest;
+            bool useBrain = hasBrain && !fileIoTest && !abiTest;
             byte[] hello = ReadComponent(
                 fileIoTest
                     ? "fileio-" + architecture
-                    : (useBrain ? "runtime-" + architecture : "hello-" + architecture));
+                    : (abiTest ? "abi-conformance-" + architecture : (useBrain ? "runtime-" + architecture : "hello-" + architecture)));
             byte[] wasm = useBrain
                 ? (overrideWasmPath != null ? File.ReadAllBytes(overrideWasmPath) : TryReadComponent("brain.wasm"))
                 : null;
