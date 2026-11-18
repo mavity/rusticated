@@ -32,7 +32,7 @@ func rusticatedSocket(
 	laddr, raddr sockaddr,
 	ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error,
 ) (*netFD, error) {
-	if sotype != syscall.SOCK_STREAM {
+	if sotype != syscall.SOCK_STREAM && sotype != syscall.SOCK_DGRAM {
 		return nil, os.NewSyscallError("socket", syscall.ENOTSUP)
 	}
 
@@ -73,9 +73,16 @@ func rusticatedSocket(
 			syscall.Close(sysfd)
 			return nil, os.NewSyscallError("bind", bindErr)
 		}
-		if listenErr := syscall.Listen(sysfd, syscall.SOMAXCONN); listenErr != nil {
-			syscall.Close(sysfd)
-			return nil, os.NewSyscallError("listen", listenErr)
+		if sotype == syscall.SOCK_STREAM {
+			if listenErr := syscall.Listen(sysfd, syscall.SOMAXCONN); listenErr != nil {
+				syscall.Close(sysfd)
+				return nil, os.NewSyscallError("listen", listenErr)
+			}
+		} else {
+			if listenErr := syscall.Listen(sysfd, 0); listenErr != nil {
+				syscall.Close(sysfd)
+				return nil, os.NewSyscallError("bind", listenErr)
+			}
 		}
 		if boundPort := syscall.SocketBoundPort(sysfd); boundPort > 0 {
 			if tcpAddr, ok := laddr.(*TCPAddr); ok && tcpAddr != nil && tcpAddr.Port == 0 {

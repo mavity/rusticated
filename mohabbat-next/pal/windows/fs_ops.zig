@@ -284,7 +284,7 @@ pub fn dirRead(s: *PalState, ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, l
     mem.completeInline(ov, 0, 0, written);
 }
 
-pub fn pathStat(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, _: u32, out: [*]u8, cap: usize) void {
+pub fn pathStat(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32, out: [*]u8, cap: usize) void {
     if (cap < @sizeOf(pal_abi.AbiStat)) {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
@@ -302,6 +302,25 @@ pub fn pathStat(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
     const GetAttrFn = *const fn ([*:0]const u16, u32, *win.Win32FileAttributeData) callconv(win.win_cc) i32;
     const get_attr: GetAttrFn = @ptrCast(@alignCast(p_attr));
     var attr: win.Win32FileAttributeData = .{};
+    var st: pal_abi.AbiStat = .{};
+    if ((flags & pal_abi.PATH_STAT_FLAG_NOFOLLOW) != 0) {
+        const p_gfa = mem.resolveKernel32(s, "GetFileAttributesW") orelse {
+            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+            return;
+        };
+        const GetAttrSimpleFn = *const fn ([*:0]const u16) callconv(win.win_cc) u32;
+        const get_attr_simple: GetAttrSimpleFn = @ptrCast(@alignCast(p_gfa));
+        const simple = get_attr_simple(wpath);
+        if (simple != 0xffff_ffff and (simple & 0x400) != 0) {
+            st.kind = pal_abi.STAT_KIND_SYMLINK;
+            st.mode = 0o777;
+            st.valid_mask = 0x1f;
+            const bytes = std.mem.asBytes(&st);
+            @memcpy(out[0..bytes.len], bytes);
+            mem.completeInline(ov, 0, 0, 0);
+            return;
+        }
+    }
     if (get_attr(wpath, 0, &attr) == 0) {
         const gle = s.p_get_last_error orelse {
             mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
@@ -311,14 +330,13 @@ pub fn pathStat(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         return;
     }
 
-    var st: pal_abi.AbiStat = .{};
     st.kind = if ((attr.attributes & 0x400) != 0)
         pal_abi.STAT_KIND_SYMLINK
     else if ((attr.attributes & 0x10) != 0)
         pal_abi.STAT_KIND_DIR
     else
         pal_abi.STAT_KIND_FILE;
-    st.mode = if ((attr.attributes & 0x1) != 0) 0o444 else 0o644;
+    st.mode = if ((attr.attributes & 0x1) != 0) 0o444 else 0o755;
     if (st.kind == pal_abi.STAT_KIND_DIR) st.mode |= 0o111;
     st.size = (@as(u64, attr.size_high) << 32) | attr.size_low;
     st.mtime_ns = win.fileTimeToUnixNs(attr.last_write_time);

@@ -38,6 +38,7 @@ type overlappedContext struct {
 func (o *Overlapped) isComplete() bool { return o.flags&1 != 0 }
 
 const readFlagPositional uint32 = 1 << 24
+const writeFlagPositional uint32 = 1 << 25
 
 func awaitOverlapped(ctx *overlappedContext)
 func cancelOverlapped(ctx *overlappedContext)
@@ -932,7 +933,16 @@ func Chmod(path string, mode uint32) error {
 	}
 	return nil
 }
-func Fchmod(fd int, mode uint32) error       { return nil }
+func Fchmod(fd int, mode uint32) error {
+	entry, ok := fdMap[int32(fd)]
+	if !ok {
+		return errnoErr(EBADF)
+	}
+	if entry.path == "" || entry.path == "socket:pending" || entry.path == "socket:listening" || entry.path == "socket:connected" {
+		return errnoErr(EINVAL)
+	}
+	return Chmod(entry.path, mode)
+}
 func Chown(path string, uid, gid int) error  { return ENOSYS }
 func Fchown(fd int, uid, gid int) error      { return ENOSYS }
 func Lchown(path string, uid, gid int) error { return ENOSYS }
@@ -1057,7 +1067,28 @@ func Pread(fd int, b []byte, offset int64) (int, error) {
 	}
 	return int(ctx.o.resultExt), nil
 }
-func Pwrite(fd int, b []byte, offset int64) (int, error) { return 0, ENOSYS }
+func Pwrite(fd int, b []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, errnoErr(EINVAL)
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	handle, err := fdToHandle(int32(fd))
+	if err != 0 {
+		return 0, errnoErr(err)
+	}
+	var ctx overlappedContext
+	ctx.o.flags = writeFlagPositional
+	ctx.readOffset = uint64(offset)
+	rusticated_write(unsafe.Pointer(&ctx.o), handle, &b[0], uint32(len(b)))
+	runtime.KeepAlive(b)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
+	}
+	return int(ctx.o.resultExt), nil
+}
 
 func Dup(oldfd int) (int, error) {
 	entry, ok := fdMap[int32(oldfd)]

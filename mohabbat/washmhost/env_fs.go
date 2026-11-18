@@ -131,6 +131,18 @@ func marshalAbiStat(stat AbiStat) []byte {
 
 func statModeAndKind(mode os.FileMode) (uint32, uint32) {
 	rawMode := uint32(mode.Perm())
+	if runtime.GOOS == "windows" {
+		switch {
+		case mode.IsDir():
+			rawMode = 0o755
+		case mode&os.ModeSymlink != 0:
+			rawMode = 0o777
+		case rawMode&0o444 == 0:
+			rawMode = 0o444
+		default:
+			rawMode = 0o755
+		}
+	}
 	switch {
 	case mode&os.ModeSetuid != 0:
 		rawMode |= 0o4000
@@ -183,6 +195,7 @@ func statKindFromUnixMode(mode uint32) uint32 {
 // readFlagPositional selects the positioned-read request extension. Its
 // little-endian u64 offset follows the 24-byte Overlapped header.
 const readFlagPositional uint32 = 1 << 24
+const writeFlagPositional uint32 = 1 << 25
 
 func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
@@ -390,12 +403,37 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
+	mem := m.Memory()
+	request, memOk := mem.Read(ovPtr, 24)
+	if !memOk {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	requestFlags := binary.LittleEndian.Uint32(request[:4])
+	if requestFlags&^writeFlagPositional != 0 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	positioned := requestFlags&writeFlagPositional != 0
+	var offset uint64
+	if positioned {
+		request, memOk = mem.Read(ovPtr, 32)
+		if !memOk {
+			writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+			return
+		}
+		offset = binary.LittleEndian.Uint64(request[24:32])
+		if offset > uint64(^uint64(0)>>1) {
+			writeOverlapped(m, ovPtr, wasiEOVERFLOW, 0, 0)
+			return
+		}
+	}
+
 	f, isWriter := fAny.(interface{ Write([]byte) (int, error) })
 	if !isWriter {
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
-	mem := m.Memory()
 	buf, memOk := mem.Read(ptr, lenBytes)
 	if !memOk {
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
@@ -405,8 +443,22 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 	dataCopy := make([]byte, lenBytes)
 	copy(dataCopy, buf)
 
+	var write func([]byte) (int, error)
+	if positioned {
+		writerAt, ok := fAny.(io.WriterAt)
+		if !ok {
+			writeOverlapped(m, ovPtr, wasiESPIPE, 0, 0)
+			return
+		}
+		write = func(p []byte) (int, error) {
+			return writerAt.WriteAt(p, int64(offset))
+		}
+	} else {
+		write = f.Write
+	}
+
 	if handle == 1 || handle == 2 {
-		n, err := f.Write(dataCopy)
+		n, err := write(dataCopy)
 		retCode := uint32(0)
 		if err != nil {
 			retCode = mapErrno(err)
@@ -418,7 +470,7 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 
 	state := h.RegisterOp(ovPtr, fAny)
 	go func() {
-		n, err := f.Write(dataCopy)
+		n, err := write(dataCopy)
 		retCode := uint32(0)
 		if err != nil {
 			debugLog("sys_write fail: handle=%d err=%v", handle, err)

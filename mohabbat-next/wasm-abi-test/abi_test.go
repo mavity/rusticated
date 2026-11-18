@@ -3067,6 +3067,9 @@ func TestSysFs(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("Windows does not expose POSIX special mode bits")
 		}
+		if pi := syscall.GetPlatformInfo(); pi != nil && pi.OSKind == 1 {
+			t.Skip("native Windows host does not expose POSIX special mode bits")
+		}
 		if err := os.Chmod(file, 0o4755); err != nil {
 			t.Fatal(err)
 		}

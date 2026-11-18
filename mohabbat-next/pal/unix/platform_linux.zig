@@ -24,6 +24,7 @@ const HandleEntry = struct {
     fd: i32 = -1,
     is_dir: bool = false,
     is_socket: bool = false,
+    is_udp: bool = false,
     is_process: bool = false,
 };
 
@@ -350,6 +351,17 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     };
+    if (he.is_udp) {
+        var sa: sys.SockAddrIn = undefined;
+        var sa_len: u32 = @sizeOf(sys.SockAddrIn);
+        const res = sys.sys6(sys.NR.recvfrom, @intCast(he.fd), @intFromPtr(buf), len, 0, @intFromPtr(&sa), @intFromPtr(&sa_len));
+        if (sys.isErr(res)) |e| {
+            completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+            return;
+        }
+        completeInline(ov, 0, 0, res);
+        return;
+    }
     const positional = (ov.flags & pal_abi.READ_FLAG_POSITIONAL) != 0;
     const res = if (positional) blk: {
         const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
@@ -370,6 +382,19 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
 
 fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
+    if (handle >= 3) {
+        if (findHandle(s, handle)) |he| {
+            if (he.is_udp) {
+                const res = sys.sys6(sys.NR.sendto, @intCast(he.fd), @intFromPtr(buf), len, 0, 0, 0);
+                if (sys.isErr(res)) |e| {
+                    completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+                    return;
+                }
+                completeInline(ov, 0, 0, res);
+                return;
+            }
+        }
+    }
     const fd: i32 = if (handle == 1) 1 else if (handle == 2) 2 else blk: {
         const he = findHandle(s, handle) orelse {
             completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
@@ -377,7 +402,20 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
         };
         break :blk he.fd;
     };
-    const res = sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(buf), len);
+    const positional = (ov.flags & pal_abi.WRITE_FLAG_POSITIONAL) != 0;
+    const res = if (positional) blk: {
+        if (len == 0) {
+            completeInline(ov, 0, 0, 0);
+            return;
+        }
+        const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
+        const off = trailing.*;
+        if (off < 0) {
+            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        break :blk sys.sys4(sys.NR.pwrite64, @intCast(fd), @intFromPtr(buf), len, @bitCast(off));
+    } else sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(buf), len);
     if (sys.isErr(res)) |e| {
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
@@ -711,7 +749,11 @@ fn parseIpv4(addr: []const u8) ?[4]u8 {
 
 fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, port: u32, flags: u32) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
-    const sock_res = sys.sys3(sys.NR.socket, 2, 1 | 0o2000000, 6); // AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP
+    const is_udp = (flags & (1 << 2)) != 0;
+    const sock_res = if (is_udp)
+        sys.sys3(sys.NR.socket, 2, 2 | 0o2000000, 17) // AF_INET, SOCK_DGRAM|SOCK_CLOEXEC, IPPROTO_UDP
+    else
+        sys.sys3(sys.NR.socket, 2, 1 | 0o2000000, 6); // AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP
     if (sys.isErr(sock_res)) |e| {
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
@@ -739,11 +781,13 @@ fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, p
             completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
             return;
         }
-        const listen_res = sys.sys2(sys.NR.listen, @intCast(fd), 128);
-        if (sys.isErr(listen_res)) |e| {
-            _ = sys.sys1(sys.NR.close, @intCast(fd));
-            completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-            return;
+        if (!is_udp) {
+            const listen_res = sys.sys2(sys.NR.listen, @intCast(fd), 128);
+            if (sys.isErr(listen_res)) |e| {
+                _ = sys.sys1(sys.NR.close, @intCast(fd));
+                completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+                return;
+            }
         }
         var eff_port: u64 = port;
         var slen: u32 = @sizeOf(sys.SockAddrIn);
@@ -762,6 +806,7 @@ fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, p
         };
         he.fd = fd;
         he.is_socket = true;
+        he.is_udp = is_udp;
         completeInline(ov, 0, eff_port, he.token);
         return;
     }
@@ -783,6 +828,7 @@ fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, p
     };
     he.fd = fd;
     he.is_socket = true;
+    he.is_udp = is_udp;
     completeInline(ov, 0, port, he.token);
 }
 
@@ -1088,6 +1134,9 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
     var in_fds: [2]i32 = .{ -1, -1 };
     var out_fds: [2]i32 = .{ -1, -1 };
     var err_fds: [2]i32 = .{ -1, -1 };
+    var pty_in_fds: [2]i32 = .{ -1, -1 };
+    var pty_out_fds: [2]i32 = .{ -1, -1 };
+    var pty_enabled = false;
     var child_fds: [3]i32 = .{ 0, 1, 2 };
 
     if (has_stdio) {
@@ -1098,6 +1147,15 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
                 const flags: u32 = if (idx == 0) sys.O_RDONLY else sys.O_WRONLY;
                 const nfd = sys.sys4(sys.NR.openat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(null_p.ptr), flags, 0);
                 if (sys.isErr(nfd) == null) child_fds[idx] = @intCast(nfd);
+            } else if (std.mem.startsWith(u8, spec, "pty:")) {
+                pty_enabled = true;
+                if (sys.isErr(sys.sys2(sys.NR.pipe2, @intFromPtr(&pty_in_fds), 0o2000000)) == null and
+                    sys.isErr(sys.sys2(sys.NR.pipe2, @intFromPtr(&pty_out_fds), 0o2000000)) == null)
+                {
+                    child_fds[0] = pty_in_fds[0];
+                    child_fds[1] = pty_out_fds[1];
+                    child_fds[2] = pty_out_fds[1];
+                }
             } else if (std.mem.startsWith(u8, spec, "fd:")) {
                 const tok = std.fmt.parseInt(u64, spec[3..], 10) catch 0;
                 if (tok <= 2) {
@@ -1118,7 +1176,7 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
         child_fds = .{ in_fds[0], out_fds[1], err_fds[1] };
     }
 
-    const pid_res = sys.sys2(sys.NR.clone, 17, 0); // SIGCHLD = 17
+    const pid_res = sys.sys1(sys.NR.fork, 0);
     if (sys.isErr(pid_res)) |e| {
         if (!has_stdio) {
             _ = sys.sys1(sys.NR.close, @intCast(in_fds[0]));
@@ -1139,6 +1197,9 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
             _ = sys.sys1(sys.NR.close, @intCast(in_fds[1]));
             _ = sys.sys1(sys.NR.close, @intCast(out_fds[0]));
             _ = sys.sys1(sys.NR.close, @intCast(err_fds[0]));
+        } else if (pty_enabled) {
+            _ = sys.sys1(sys.NR.close, @intCast(pty_in_fds[1]));
+            _ = sys.sys1(sys.NR.close, @intCast(pty_out_fds[0]));
         }
         for (0..3) |idx| {
             const target: i32 = @intCast(idx);
@@ -1160,6 +1221,9 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
         _ = sys.sys1(sys.NR.close, @intCast(in_fds[0]));
         _ = sys.sys1(sys.NR.close, @intCast(out_fds[1]));
         _ = sys.sys1(sys.NR.close, @intCast(err_fds[1]));
+    } else if (pty_enabled) {
+        _ = sys.sys1(sys.NR.close, @intCast(pty_in_fds[0]));
+        _ = sys.sys1(sys.NR.close, @intCast(pty_out_fds[1]));
     }
 
     const proc_he = allocHandle(s) orelse {
@@ -1172,7 +1236,17 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
     const pso: *pal_abi.ProcessSpawnOverlapped = @ptrCast(@alignCast(ov));
     pso.child_handle = proc_he.token;
     pso.pty_handle = 0;
-    if (!has_stdio) {
+    if (pty_enabled) {
+        const pty_he = allocHandle(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        pty_he.fd = pty_out_fds[0];
+        pso.pty_handle = pty_he.token;
+        pso.in_handle = 0;
+        pso.out_handle = pty_he.token;
+        pso.err_handle = 0;
+    } else if (!has_stdio) {
         const in_he = allocHandle(s) orelse {
             completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;

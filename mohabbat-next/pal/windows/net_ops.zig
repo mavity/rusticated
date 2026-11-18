@@ -92,7 +92,8 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
     const close_fn: CloseSockFn = @ptrCast(@alignCast(p_close));
     const wsa_gle: WsaGleFn = @ptrCast(@alignCast(p_gle));
 
-    const sock = sock_fn(2, 1, 6); // AF_INET, SOCK_STREAM, IPPROTO_TCP
+    const is_udp = (flags & (1 << 2)) != 0;
+    const sock = sock_fn(2, if (is_udp) 2 else 1, if (is_udp) 17 else 6); // AF_INET, DGRAM/STREAM
     if (sock == std.math.maxInt(usize)) {
         mem.completeInline(ov, win.mapWinError(@intCast(wsa_gle())), 0, 0);
         return;
@@ -116,20 +117,28 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
             mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
             return;
         };
-        const p_listen = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "listen") orelse {
-            _ = close_fn(sock);
-            mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
-            return;
-        };
         const BindFn = *const fn (usize, *const SockAddrIn, i32) callconv(win.win_cc) i32;
-        const ListenFn = *const fn (usize, i32) callconv(win.win_cc) i32;
         const bind_fn: BindFn = @ptrCast(@alignCast(p_bind));
-        const listen_fn: ListenFn = @ptrCast(@alignCast(p_listen));
-        if (bind_fn(sock, &sa, @sizeOf(SockAddrIn)) != 0 or listen_fn(sock, 128) != 0) {
+        if (bind_fn(sock, &sa, @sizeOf(SockAddrIn)) != 0) {
             const err = win.mapWinError(@intCast(wsa_gle()));
             _ = close_fn(sock);
             mem.completeInline(ov, err, 0, 0);
             return;
+        }
+        if (!is_udp) {
+            const p_listen = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "listen") orelse {
+                _ = close_fn(sock);
+                mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+                return;
+            };
+            const ListenFn = *const fn (usize, i32) callconv(win.win_cc) i32;
+            const listen_fn: ListenFn = @ptrCast(@alignCast(p_listen));
+            if (listen_fn(sock, 128) != 0) {
+                const err = win.mapWinError(@intCast(wsa_gle()));
+                _ = close_fn(sock);
+                mem.completeInline(ov, err, 0, 0);
+                return;
+            }
         }
         var eff_port: u64 = port;
         if (mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "getsockname")) |p_gsn| {

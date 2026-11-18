@@ -447,6 +447,15 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
     op.native_io = true;
     if (he.is_pipe) {
         op.file_offset = 0;
+    } else if ((ov.flags & pal_abi.WRITE_FLAG_POSITIONAL) != 0) {
+        const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
+        if (trailing.* < 0) {
+            mem.freeOp(s, op);
+            mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        op.file_offset = @intCast(trailing.*);
+        op.advance_seq = false;
     } else {
         op.file_offset = he.seq_pos;
         op.advance_seq = true;

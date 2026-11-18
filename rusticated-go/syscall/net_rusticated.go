@@ -33,6 +33,10 @@ var netSocketBind = map[int32]struct {
 	port uint16
 }{}
 
+var netSocketType = map[int32]int{}
+
+const netFlagUDP uint32 = 1 << 2
+
 var fdOverlapped = map[int]map[*overlappedContext]struct{}{}
 
 func trackFDOverlapped(fd int, ctx *overlappedContext) {
@@ -165,13 +169,14 @@ func callNetOpen(addr string, port uint16, flags uint32) (uint64, uint16, Errno)
 // ── Socket syscall bridge ──────────────────────────────────────────────────
 
 func Socket(proto, sotype, unused int) (fd int, err error) {
-	if sotype != SOCK_STREAM {
+	if sotype != SOCK_STREAM && sotype != SOCK_DGRAM {
 		return 0, ENOSYS
 	}
 	ifd, errno := allocFD(netPendingHandle, "socket:pending")
 	if errno != 0 {
 		return 0, errnoErr(errno)
 	}
+	netSocketType[int32(ifd)] = sotype
 	return int(ifd), nil
 }
 
@@ -194,7 +199,11 @@ func Listen(fd int, backlog int) error {
 		bind.addr = ""
 		bind.port = 0
 	}
-	handle, boundPort, errno := callNetOpen(bind.addr, bind.port, 0 /* listen */)
+	flags := uint32(0)
+	if netSocketType[int32(fd)] == SOCK_DGRAM {
+		flags |= netFlagUDP
+	}
+	handle, boundPort, errno := callNetOpen(bind.addr, bind.port, flags)
 	if errno != 0 {
 		return errnoErr(errno)
 	}
@@ -236,7 +245,11 @@ func Connect(fd int, sa Sockaddr) error {
 	if addr == "" {
 		return errnoErr(EADDRNOTAVAIL)
 	}
-	handle, _, errno := callNetOpen(addr, port, 1 /* connect */)
+	flags := uint32(1)
+	if netSocketType[int32(fd)] == SOCK_DGRAM {
+		flags |= netFlagUDP
+	}
+	handle, _, errno := callNetOpen(addr, port, flags)
 	if errno != 0 {
 		return errnoErr(errno)
 	}
@@ -246,10 +259,40 @@ func Connect(fd int, sa Sockaddr) error {
 }
 
 func Recvfrom(fd int, p []byte, flags int) (n int, from Sockaddr, err error) {
-	return 0, nil, ENOSYS
+	handle, errno := fdToHandle(int32(fd))
+	if errno != 0 {
+		return 0, nil, errnoErr(errno)
+	}
+	if len(p) == 0 {
+		return 0, SockaddrInet4{}, nil
+	}
+	var ctx overlappedContext
+	rusticated_read(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
+	runtime.KeepAlive(p)
+	awaitFDOverlapped(fd, &ctx)
+	if ctx.o.hostError != 0 {
+		return 0, nil, errnoErr(Errno(ctx.o.hostError))
+	}
+	return int(ctx.o.resultExt), SockaddrInet4{}, nil
 }
 
-func Sendto(fd int, p []byte, flags int, to Sockaddr) error { return ENOSYS }
+func Sendto(fd int, p []byte, flags int, to Sockaddr) error {
+	handle, errno := fdToHandle(int32(fd))
+	if errno != 0 {
+		return errnoErr(errno)
+	}
+	if len(p) == 0 {
+		return nil
+	}
+	var ctx overlappedContext
+	rusticated_write(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
+	runtime.KeepAlive(p)
+	awaitFDOverlapped(fd, &ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
 
 func Recvmsg(fd int, p, oob []byte, flags int) (n, oobn, recvflags int, from Sockaddr, err error) {
 	return 0, 0, 0, nil, ENOSYS

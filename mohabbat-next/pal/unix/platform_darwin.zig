@@ -65,6 +65,7 @@ const PalState = struct {
     p_read: ?*const fn (i32, [*]u8, usize) callconv(.c) isize = null,
     p_write: ?*const fn (i32, [*]const u8, usize) callconv(.c) isize = null,
     p_pread: ?*const fn (i32, [*]u8, usize, i64) callconv(.c) isize = null,
+    p_pwrite: ?*const fn (i32, [*]const u8, usize, i64) callconv(.c) isize = null,
     p_open: ?*const fn ([*:0]const u8, c_int, u32) callconv(.c) i32 = null,
     p_lseek: ?*const fn (i32, i64, c_int) callconv(.c) i64 = null,
     p_ftruncate: ?*const fn (i32, i64) callconv(.c) c_int = null,
@@ -407,7 +408,19 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
         };
         break :blk he.fd;
     };
-    const n = w(fd, buf, len);
+    const positional = (ov.flags & pal_abi.WRITE_FLAG_POSITIONAL) != 0;
+    const n: isize = if (positional) blk: {
+        const pwrite = s.p_pwrite orelse {
+            completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+            return;
+        };
+        const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
+        if (trailing.* < 0) {
+            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+            return;
+        }
+        break :blk pwrite(fd, buf, len, trailing.*);
+    } else w(fd, buf, len);
     if (n < 0) {
         completeInline(ov, mapDarwinErrno(s), 0, 0);
         return;
@@ -702,6 +715,7 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     s.p_read = @ptrCast(@alignCast(sym(s, "read") orelse return 12));
     s.p_write = @ptrCast(@alignCast(sym(s, "write") orelse return 12));
     s.p_pread = @ptrCast(@alignCast(sym(s, "pread") orelse return 12));
+    s.p_pwrite = @ptrCast(@alignCast(sym(s, "pwrite") orelse return 12));
     s.p_open = @ptrCast(@alignCast(sym(s, "open") orelse return 12));
     s.p_lseek = @ptrCast(@alignCast(sym(s, "lseek") orelse return 12));
     s.p_ftruncate = @ptrCast(@alignCast(sym(s, "ftruncate") orelse return 12));

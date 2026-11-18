@@ -95,7 +95,11 @@ fn envRead(caller: *zwasm.Caller, ov_ptr: i32, handle: i64, buf_ptr: i32, buf_le
 
 fn envWrite(caller: *zwasm.Caller, ov_ptr: i32, handle: i64, buf_ptr: i32, buf_len: i32) void {
     const s = guestSliceChecked(caller, buf_ptr, buf_len);
-    pal_bridge.abi().write(guestOverlapped(caller, ov_ptr), @bitCast(handle), s.ptr, s.len);
+    const ov = guestOverlapped(caller, ov_ptr);
+    if ((ov.flags & pal_abi.WRITE_FLAG_POSITIONAL) != 0) {
+        _ = guestSliceChecked(caller, ov_ptr, @sizeOf(pal_abi.Overlapped) + 8);
+    }
+    pal_bridge.abi().write(ov, @bitCast(handle), s.ptr, s.len);
 }
 
 fn envSeek(caller: *zwasm.Caller, ov_ptr: i32, handle: i64, offset: i64, whence: i32) void {

@@ -12,6 +12,7 @@ pub const PREFIX_GLOBALS_OFFSET: usize = 0x10000;
 
 pub const FLAG_COMPLETED: u32 = 1 << 0;
 pub const READ_FLAG_POSITIONAL: u32 = 1 << 24;
+pub const WRITE_FLAG_POSITIONAL: u32 = 1 << 25;
 
 pub const MEM_READWRITE: u32 = 1;
 pub const MEM_CODE_JIT_RW: u32 = 2;

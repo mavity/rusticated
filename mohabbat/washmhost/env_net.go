@@ -31,33 +31,71 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 	}
 	addr := string(buf)
 	isConnect := (flags & 1) != 0
+	isUDP := (flags & (1 << 2)) != 0
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		var handle uint64
 		var err error
 		if isConnect {
-			var conn net.Conn
-			conn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", addr, port))
-			if err == nil {
-				h.mu.Lock()
-				handle = h.nextHandle
-				h.nextHandle++
-				h.handles[handle] = conn
-				h.mu.Unlock()
+			if isUDP {
+				udpAddr, addrErr := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr, port))
+				if addrErr != nil {
+					err = addrErr
+				} else {
+					var conn *net.UDPConn
+					conn, err = net.DialUDP("udp", nil, udpAddr)
+					if err == nil {
+						h.mu.Lock()
+						handle = h.nextHandle
+						h.nextHandle++
+						h.handles[handle] = conn
+						h.mu.Unlock()
+					}
+				}
+			} else {
+				var conn net.Conn
+				conn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", addr, port))
+				if err == nil {
+					h.mu.Lock()
+					handle = h.nextHandle
+					h.nextHandle++
+					h.handles[handle] = conn
+					h.mu.Unlock()
+				}
 			}
 		} else {
-			var ln net.Listener
-			ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", addr, port))
-			if err == nil {
-				if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && tcpAddr.Port > 0 {
-					port = uint16(tcpAddr.Port)
+			if isUDP {
+				udpAddr, addrErr := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr, port))
+				if addrErr != nil {
+					err = addrErr
+				} else {
+					var conn *net.UDPConn
+					conn, err = net.ListenUDP("udp", udpAddr)
+					if err == nil {
+						if udpLocal, ok := conn.LocalAddr().(*net.UDPAddr); ok && udpLocal.Port > 0 {
+							port = uint16(udpLocal.Port)
+						}
+						h.mu.Lock()
+						handle = h.nextHandle
+						h.nextHandle++
+						h.handles[handle] = conn
+						h.mu.Unlock()
+					}
 				}
-				h.mu.Lock()
-				handle = h.nextHandle
-				h.nextHandle++
-				h.handles[handle] = ln
-				h.mu.Unlock()
+			} else {
+				var ln net.Listener
+				ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", addr, port))
+				if err == nil {
+					if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && tcpAddr.Port > 0 {
+						port = uint16(tcpAddr.Port)
+					}
+					h.mu.Lock()
+					handle = h.nextHandle
+					h.nextHandle++
+					h.handles[handle] = ln
+					h.mu.Unlock()
+				}
 			}
 		}
 
