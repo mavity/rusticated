@@ -156,6 +156,7 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
         };
         he.handle = @ptrFromInt(sock);
         he.is_socket = true;
+        he.is_udp = is_udp;
         mem.completeInline(ov, 0, eff_port, he.token);
         return;
     }
@@ -180,6 +181,7 @@ pub fn netOpen(s: *PalState, ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, add
     };
     he.handle = @ptrFromInt(sock);
     he.is_socket = true;
+    he.is_udp = is_udp;
     mem.completeInline(ov, 0, port, he.token);
 }
 

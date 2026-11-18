@@ -26,6 +26,9 @@ const HandleEntry = struct {
     is_socket: bool = false,
     is_udp: bool = false,
     is_process: bool = false,
+    is_pty: bool = false,
+    pty_read_fd: i32 = -1,
+    pty_write_fd: i32 = -1,
 };
 
 const OpKind = enum(u8) {
@@ -34,6 +37,7 @@ const OpKind = enum(u8) {
     timer = 2,
     accept = 3,
     wait_proc = 4,
+    udp_read = 5,
 };
 
 const PendingOp = struct {
@@ -351,15 +355,25 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
     };
-    if (he.is_udp) {
-        var sa: sys.SockAddrIn = undefined;
-        var sa_len: u32 = @sizeOf(sys.SockAddrIn);
-        const res = sys.sys6(sys.NR.recvfrom, @intCast(he.fd), @intFromPtr(buf), len, 0, @intFromPtr(&sa), @intFromPtr(&sa_len));
+    if (he.is_pty) {
+        const res = sys.sys3(sys.NR.read, @intCast(he.pty_read_fd), @intFromPtr(buf), len);
         if (sys.isErr(res)) |e| {
             completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
             return;
         }
         completeInline(ov, 0, 0, res);
+        return;
+    }
+    if (he.is_udp) {
+        const op = allocOp(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .udp_read;
+        op.guest_ov = ov;
+        op.fd = he.fd;
+        op.buf = buf;
+        op.len = len;
         return;
     }
     const positional = (ov.flags & pal_abi.READ_FLAG_POSITIONAL) != 0;
@@ -382,6 +396,19 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
 
 fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
+    if (handle >= 3) {
+        if (findHandle(s, handle)) |he| {
+            if (he.is_pty) {
+                const res = sys.sys3(sys.NR.write, @intCast(he.pty_write_fd), @intFromPtr(buf), len);
+                if (sys.isErr(res)) |e| {
+                    completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+                    return;
+                }
+                completeInline(ov, 0, 0, res);
+                return;
+            }
+        }
+    }
     if (handle >= 3) {
         if (findHandle(s, handle)) |he| {
             if (he.is_udp) {
@@ -462,6 +489,12 @@ fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(p
 fn abiHandleClose(handle: u64) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
     const he = findHandle(s, handle) orelse return;
+    if (he.is_pty) {
+        if (he.pty_read_fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.pty_read_fd));
+        if (he.pty_write_fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.pty_write_fd));
+        he.* = .{};
+        return;
+    }
     if (he.fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.fd));
     he.* = .{};
 }
@@ -1212,6 +1245,17 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
         }
         const envp = s.host.envp;
         _ = sys.sys3(sys.NR.execve, @intFromPtr(argv_ptrs[0].?), @intFromPtr(&argv_ptrs), @intFromPtr(envp));
+        if (std.mem.indexOfScalar(u8, prog, '/') == null) {
+            var fallback: [4096]u8 = undefined;
+            const bin = "/bin/";
+            if (prog.len + bin.len < fallback.len) {
+                @memcpy(fallback[0..bin.len], bin);
+                @memcpy(fallback[bin.len..][0..prog.len], prog);
+                fallback[bin.len + prog.len] = 0;
+                argv_ptrs[0] = @ptrCast(&fallback[0]);
+                _ = sys.sys3(sys.NR.execve, @intFromPtr(argv_ptrs[0].?), @intFromPtr(&argv_ptrs), @intFromPtr(envp));
+            }
+        }
         _ = sys.sys1(sys.NR.exit_group, 127);
         unreachable;
     }
@@ -1242,6 +1286,9 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
             return;
         };
         pty_he.fd = pty_out_fds[0];
+        pty_he.is_pty = true;
+        pty_he.pty_read_fd = pty_out_fds[0];
+        pty_he.pty_write_fd = pty_in_fds[1];
         pso.pty_handle = pty_he.token;
         pso.in_handle = 0;
         pso.out_handle = pty_he.token;
@@ -1453,7 +1500,7 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                     const rem = op.deadline_ns - now;
                     if (min_wait_ns == null or rem < min_wait_ns.?) min_wait_ns = rem;
                 }
-            } else if ((op.kind == .read_fd or op.kind == .accept) and pfd_count < pfds.len) {
+            } else if ((op.kind == .read_fd or op.kind == .accept or op.kind == .udp_read) and pfd_count < pfds.len) {
                 pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLIN, .revents = 0 };
                 op_idx[pfd_count] = idx;
                 pfd_count += 1;
@@ -1510,6 +1557,16 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                             _ = sys.sys1(sys.NR.close, @intCast(cli_fd));
                             completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
                         }
+                    }
+                } else if (op.kind == .udp_read) {
+                    var sa: sys.SockAddrIn = undefined;
+                    var sa_len: u32 = @sizeOf(sys.SockAddrIn);
+                    const res = sys.sys6(sys.NR.recvfrom, @intCast(op.fd), @intFromPtr(op.buf.?), op.len, 0, @intFromPtr(&sa), @intFromPtr(&sa_len));
+                    freeOp(s, op);
+                    if (sys.isErr(res)) |e| {
+                        completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    } else {
+                        completeInline(gov, 0, 0, res);
                     }
                 } else {
                     const res = sys.sys3(sys.NR.read, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);

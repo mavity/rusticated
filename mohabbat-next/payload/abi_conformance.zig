@@ -769,12 +769,12 @@ fn runAbiSpawnWait(g: *AbiGlobals) void {
     if (g.step == 0) {
         g.step = 1;
         if (builtin.os.tag == .windows) {
-            const cfg = "cmd.exe\x00/c\x00echo ABI_OK\x00\x00\x00\x00";
+            const cfg = "C:\\Windows\\System32\\cmd.exe\x00/c\x00echo ABI_OK\x00\x00\x00\x00";
             @memcpy(g.buf1[0..cfg.len], cfg);
             g.proc_ov = .{};
             getAbi().process_spawn(@ptrCast(&g.proc_ov), &g.buf1, cfg.len);
         } else {
-            const cfg = "sh\x00-c\x00printf ABI_OK\x00\x00\x00\x00";
+            const cfg = "/bin/sh\x00-c\x00printf ABI_OK\x00\x00\x00\x00";
             @memcpy(g.buf1[0..cfg.len], cfg);
             g.proc_ov = .{};
             getAbi().process_spawn(@ptrCast(&g.proc_ov), &g.buf1, cfg.len);
@@ -789,7 +789,8 @@ fn runAbiSpawnWait(g: *AbiGlobals) void {
         }
         g.step = 2;
         g.ov1 = .{};
-        getAbi().process_wait(&g.ov1, g.proc_ov.child_handle);
+        const wait_handle = if (g.proc_ov.child_handle != 0) g.proc_ov.child_handle else g.proc_ov.header.result_ext;
+        getAbi().process_wait(&g.ov1, wait_handle);
         if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
     }
     if (g.step == 2) {
@@ -829,12 +830,12 @@ fn runAbiPty(g: *AbiGlobals) void {
     if (g.step == 0) {
         g.step = 1;
         if (builtin.os.tag == .windows) {
-            const cfg = "cmd.exe\x00/c\x00echo 123\x00\x00\x00pty:80,24\x00";
+            const cfg = "C:\\Windows\\System32\\cmd.exe\x00/c\x00echo 123\x00\x00\x00pty:80,24\x00";
             @memcpy(g.buf1[0..cfg.len], cfg);
             g.proc_ov = .{};
             getAbi().process_spawn(@ptrCast(&g.proc_ov), &g.buf1, cfg.len);
         } else {
-            const cfg = "sh\x00-c\x00printf 123\x00\x00\x00pty:80,24\x00";
+            const cfg = "/bin/sh\x00-c\x00printf 123\x00\x00\x00pty:80,24\x00";
             @memcpy(g.buf1[0..cfg.len], cfg);
             g.proc_ov = .{};
             getAbi().process_spawn(@ptrCast(&g.proc_ov), &g.buf1, cfg.len);
@@ -873,7 +874,8 @@ fn runAbiPty(g: *AbiGlobals) void {
     if (g.step == 3) {
         if (g.ov2.@"error" == 0) passCase(g, "abi_proc/pty_read") else failCase(g, "abi_proc/pty_read", g.ov2.@"error");
         g.ov1 = .{};
-        getAbi().process_wait(&g.ov1, g.proc_ov.child_handle);
+        const wait_handle = if (g.proc_ov.child_handle != 0) g.proc_ov.child_handle else g.proc_ov.header.result_ext;
+        getAbi().process_wait(&g.ov1, wait_handle);
         g.step = 4;
         if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
     }
@@ -1081,7 +1083,8 @@ fn runTestStartWithPtyChildCanUseControllingTerminal(g: *AbiGlobals) void {
         passCase(g, "TestStartWithPtyChildCanUseControllingTerminal/06_controlling_terminal_unsupported");
         g.step = 4;
         g.ov1 = .{};
-        getAbi().process_wait(&g.ov1, g.proc_ov.child_handle);
+        const wait_handle = if (g.proc_ov.child_handle != 0) g.proc_ov.child_handle else g.proc_ov.header.result_ext;
+        getAbi().process_wait(&g.ov1, wait_handle);
         if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
     }
     if (g.step == 4) {

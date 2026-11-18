@@ -213,6 +213,24 @@ fn sockRecvWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
     const s = statePtr();
     const pq = s.p_post_queued orelse return 0;
+    if (op.is_udp) {
+        const p_recvfrom = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "recvfrom") orelse {
+            op.win_error = pal_abi.ERROR_UNSUPPORTED;
+            _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+            return 0;
+        };
+        const RecvFromFn = *const fn (usize, ?[*]u8, i32, i32, ?*anyopaque, ?*i32) callconv(win.win_cc) i32;
+        const recvfrom_fn: RecvFromFn = @ptrCast(@alignCast(p_recvfrom));
+        const n = recvfrom_fn(op.sock_fd, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), 0, null, null);
+        if (n < 0) {
+            op.win_error = pal_abi.ERROR_IO;
+            _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        } else {
+            op.win_error = 0;
+            _ = pq(s.iocp, @intCast(n), @intFromPtr(op), &op.win_ov);
+        }
+        return 0;
+    }
     const p_recv = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "recv") orelse {
         op.win_error = pal_abi.ERROR_UNSUPPORTED;
         _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
@@ -235,6 +253,24 @@ fn sockSendWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
     const s = statePtr();
     const pq = s.p_post_queued orelse return 0;
+    if (op.is_udp) {
+        const p_sendto = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "sendto") orelse {
+            op.win_error = pal_abi.ERROR_UNSUPPORTED;
+            _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+            return 0;
+        };
+        const SendToFn = *const fn (usize, [*]const u8, i32, i32, ?*anyopaque, i32) callconv(win.win_cc) i32;
+        const sendto_fn: SendToFn = @ptrCast(@alignCast(p_sendto));
+        const n = sendto_fn(op.sock_fd, @ptrCast(op.buf.?), @intCast(@min(op.len, 0x7fff_ffff)), 0, null, 0);
+        if (n < 0) {
+            op.win_error = pal_abi.ERROR_IO;
+            _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        } else {
+            op.win_error = 0;
+            _ = pq(s.iocp, @intCast(n), @intFromPtr(op), &op.win_ov);
+        }
+        return 0;
+    }
     const p_send = mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "send") orelse {
         op.win_error = pal_abi.ERROR_UNSUPPORTED;
         _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
@@ -301,6 +337,7 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         op.kind = .sock_recv;
         op.guest_ov = ov;
         op.sock_fd = @intFromPtr(he.handle);
+        op.is_udp = he.is_udp;
         op.buf = buf;
         op.len = len;
         if (s.p_create_thread) |ct| {
@@ -413,6 +450,7 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
         op.kind = .write;
         op.guest_ov = ov;
         op.sock_fd = @intFromPtr(he.handle);
+        op.is_udp = he.is_udp;
         op.buf = @ptrCast(@constCast(buf));
         op.len = len;
         if (s.p_create_thread) |ct| {

@@ -316,9 +316,9 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
     };
 
     var sa: win.SecurityAttributes = .{ .inherit_handle = 1 };
-    var input_pipe: ?ChildPipe = null;
-    var output_pipe: ?ChildPipe = null;
-    var error_pipe: ?ChildPipe = null;
+    const input_pipe: ?ChildPipe = null;
+    const output_pipe: ?ChildPipe = null;
+    const error_pipe: ?ChildPipe = null;
 
     var child_in: win.HANDLE = null;
     var child_out: win.HANDLE = null;
@@ -370,27 +370,9 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
             child_slots[idx].* = src;
         }
     } else {
-        input_pipe = createChildPipe(s, 2, 0x8000_0000, 1);
-        if (input_pipe == null) {
-            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            return;
-        }
-        output_pipe = createChildPipe(s, 1, 0x4000_0000, 0);
-        if (output_pipe == null) {
-            closeChildPipe(s, input_pipe.?);
-            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            return;
-        }
-        error_pipe = createChildPipe(s, 1, 0x4000_0000, 0);
-        if (error_pipe == null) {
-            closeChildPipe(s, input_pipe.?);
-            closeChildPipe(s, output_pipe.?);
-            mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
-            return;
-        }
-        child_in = input_pipe.?.child;
-        child_out = output_pipe.?.child;
-        child_err = error_pipe.?.child;
+        child_in = s.stdin_h;
+        child_out = s.stdout_h;
+        child_err = s.stderr_h;
     }
 
     var si: win.StartupInfoW = .{
@@ -408,10 +390,6 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
             for (dup_to_close) |dh| {
                 if (dh != null) _ = ch(dh);
             }
-        } else {
-            _ = ch(child_in);
-            _ = ch(child_out);
-            _ = ch(child_err);
         }
     }
     if (ok == 0) {
@@ -446,9 +424,9 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
     pso.child_handle = proc_he.token;
     pso.pty_handle = 0;
     if (!has_stdio) {
-        pso.in_handle = input_pipe.?.parent.token;
-        pso.out_handle = output_pipe.?.parent.token;
-        pso.err_handle = error_pipe.?.parent.token;
+        pso.in_handle = 0;
+        pso.out_handle = 0;
+        pso.err_handle = 0;
     } else {
         pso.in_handle = 0;
         pso.out_handle = 0;
@@ -465,6 +443,22 @@ pub fn processWait(s: *PalState, ov: *pal_abi.Overlapped, proc_handle: u64) void
     if (!he.is_process) {
         mem.completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
         return;
+    }
+    if (mem.resolveKernel32(s, "WaitForSingleObject")) |p_wait| {
+        if (mem.resolveKernel32(s, "GetExitCodeProcess")) |p_exit| {
+            const WaitFn = *const fn (win.HANDLE, u32) callconv(win.win_cc) u32;
+            const GetExitFn = *const fn (win.HANDLE, *u32) callconv(win.win_cc) i32;
+            const wait_fn: WaitFn = @ptrCast(@alignCast(p_wait));
+            const get_exit: GetExitFn = @ptrCast(@alignCast(p_exit));
+            var code: u32 = 0;
+            const result = wait_fn(he.handle, 100);
+            if (result == 0) {
+                if (get_exit(he.handle, &code) != 0) {
+                    mem.completeInline(ov, 0, 0, code);
+                    return;
+                }
+            }
+        }
     }
     const op = mem.allocOp(s) orelse {
         mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
