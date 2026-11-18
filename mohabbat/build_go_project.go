@@ -7,6 +7,20 @@ import (
 	"path/filepath"
 )
 
+// BuildGoBrainWasm generates the Go stdlib overlay if needed and compiles a Go
+// project to a rusticated WASM brain using mohabbat's per-project dep-patcher
+// and overlay merger.
+func BuildGoBrainWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
+	goroot, _, err := resolveGoroot(ws)
+	if err != nil {
+		return fmt.Errorf("cannot resolve GOROOT: %w", err)
+	}
+	if err := generateGoOverlay(ws, goroot, verbose); err != nil {
+		return fmt.Errorf("generate Go overlay: %w", err)
+	}
+	return buildGoProjectWasm(ws, absProjectDir, outputWasm, verbose)
+}
+
 // buildGoProjectWasm compiles a Go project to rusticated WASM.
 func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")

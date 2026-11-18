@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"mohabbat/mohabbat"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -370,17 +371,10 @@ func main() {
 	var brainWasmPath string
 	if targetName != "" {
 		targetDir := filepath.Join(repoRoot, targetName)
-		overlayPath, err := ensureGoBrainOverlay(repoRoot, workDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error preparing Go brain overlay: %v\n", err)
-			os.Exit(1)
-		}
 		brainWasmPath = filepath.Join(componentsDir, targetName+".wasm")
 		fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
-		goCmd := exec.Command("go", "build", "-C", targetDir, "-buildmode=c-shared", "-overlay", overlayPath, "-trimpath", "-ldflags=-s -w", "-o", brainWasmPath, ".")
-		goCmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
-		if out, err := goCmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n%s\n", targetName, err, string(out))
+		if err := mohabbat.BuildGoBrainWasm(repoRoot, targetDir, brainWasmPath, verbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n", targetName, err)
 			os.Exit(1)
 		}
 	}

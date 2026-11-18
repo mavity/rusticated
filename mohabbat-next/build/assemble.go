@@ -12,6 +12,16 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+func writeFileIfChanged(path string, data []byte, perm os.FileMode) error {
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, perm)
+}
+
 type ComponentRange struct {
 	Offset int64
 	Length int64
@@ -340,10 +350,7 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		return fmt.Errorf("validate PE after patching DOS stub: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outputExe), 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-	if err := os.WriteFile(outputExe, completeBytes, 0o755); err != nil {
+	if err := writeFileIfChanged(outputExe, completeBytes, 0o755); err != nil {
 		return fmt.Errorf("write output executable %s: %w", outputExe, err)
 	}
 

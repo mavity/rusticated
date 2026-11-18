@@ -150,14 +150,27 @@ func buildZigFlatComponent(nextDir, zigBuildDir, outDir string, cfg ZigFlatConfi
 		}
 	}
 
-	if out, err := exec.Command("llvm-objcopy", "-O", "binary", "--only-section=.payload", elfPath, binPath).CombinedOutput(); err != nil {
+	rawBinPath := binPath + ".tmp"
+	if out, err := exec.Command("llvm-objcopy", "-O", "binary", "--only-section=.payload", elfPath, rawBinPath).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("llvm-objcopy .payload for %s: %w\n%s", cfg.Name, err, string(out))
+	}
+	defer os.Remove(rawBinPath)
+
+	finalBytes, err := os.ReadFile(rawBinPath)
+	if err != nil {
+		return "", fmt.Errorf("read extracted payload %s: %w", rawBinPath, err)
 	}
 
 	if cfg.IsRuntime {
-		if err := appendZigRuntimeRwPrefixRelocs(binPath, cfg.LinkerScript, objPath, outDir, cfg.OutFileName); err != nil {
+		footer, err := buildZigRuntimeRwPrefixRelocs(cfg.LinkerScript, objPath, outDir, cfg.OutFileName)
+		if err != nil {
 			return "", fmt.Errorf("append RW-prefix relocs for %s: %w", cfg.Name, err)
 		}
+		finalBytes = append(finalBytes, footer...)
+	}
+
+	if err := writeFileIfChanged(binPath, finalBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write binary %s: %w", binPath, err)
 	}
 
 	info, err := os.Stat(binPath)
@@ -174,7 +187,7 @@ func buildZigFlatComponent(nextDir, zigBuildDir, outDir string, cfg ZigFlatConfi
 	return binPath, nil
 }
 
-func appendZigRuntimeRwPrefixRelocs(binPath, linkerScript, objPath, outDir, outName string) error {
+func buildZigRuntimeRwPrefixRelocs(linkerScript, objPath, outDir, outName string) ([]byte, error) {
 	preElfPath := filepath.Join(outDir, ".pre-"+outName+".elf")
 	rwInitPath := filepath.Join(outDir, ".rwinit-"+outName+".bin")
 	defer os.Remove(preElfPath)
@@ -190,22 +203,22 @@ func appendZigRuntimeRwPrefixRelocs(binPath, linkerScript, objPath, outDir, outN
 		objPath,
 	}
 	if out, err := exec.Command("ld.lld", lldArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("ld.lld --emit-relocs: %w\n%s", err, string(out))
+		return nil, fmt.Errorf("ld.lld --emit-relocs: %w\n%s", err, string(out))
 	}
 
 	var rwInitBytes []byte
 	if out, err := exec.Command("llvm-objcopy", "-O", "binary", "--only-section=.rwinit", preElfPath, rwInitPath).CombinedOutput(); err == nil {
 		rwInitBytes, _ = os.ReadFile(rwInitPath)
 	} else {
-		return fmt.Errorf("llvm-objcopy .rwinit: %w\n%s", err, string(out))
+		return nil, fmt.Errorf("llvm-objcopy .rwinit: %w\n%s", err, string(out))
 	}
 	if len(rwInitBytes) > 96*1024 {
-		return fmt.Errorf(".rwinit size %d exceeds 96 KiB RW-prefix gate", len(rwInitBytes))
+		return nil, fmt.Errorf(".rwinit size %d exceeds 96 KiB RW-prefix gate", len(rwInitBytes))
 	}
 
 	relocOut, err := exec.Command("llvm-readobj", "--relocations", preElfPath).Output()
 	if err != nil {
-		return fmt.Errorf("llvm-readobj --relocations: %w", err)
+		return nil, fmt.Errorf("llvm-readobj --relocations: %w", err)
 	}
 
 	// Only collect ABS64 relocations inside .rela.rwinit (negative offsets relative to code_base)
@@ -224,11 +237,11 @@ func appendZigRuntimeRwPrefixRelocs(binPath, linkerScript, objPath, outDir, outN
 		if m := re.FindStringSubmatch(line); m != nil {
 			uoff, err := strconv.ParseUint(m[1], 16, 64)
 			if err != nil {
-				return fmt.Errorf("parse relocation offset %q: %w", m[1], err)
+				return nil, fmt.Errorf("parse relocation offset %q: %w", m[1], err)
 			}
 			soff := int64(uoff)
 			if soff >= 0 || soff < -0x18000 {
-				return fmt.Errorf("unexpected .rwinit relocation offset 0x%x", uoff)
+				return nil, fmt.Errorf("unexpected .rwinit relocation offset 0x%x", uoff)
 			}
 			offsets = append(offsets, int32(soff))
 		}
@@ -242,14 +255,7 @@ func appendZigRuntimeRwPrefixRelocs(binPath, linkerScript, objPath, outDir, outN
 	for _, off := range offsets {
 		_ = binary.Write(&buf, binary.LittleEndian, off)
 	}
-
-	f, err := os.OpenFile(binPath, os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(buf.Bytes())
-	return err
+	return buf.Bytes(), nil
 }
 
 func buildZigBrotRunner(nextDir, outDir string, cfg ZigBrotConfig, verbose bool) (string, error) {

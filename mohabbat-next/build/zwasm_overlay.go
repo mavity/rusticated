@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -945,54 +944,45 @@ func prepareZwasmOverlay(zigBuildDir string, verbose bool) (string, error) {
 		_ = os.RemoveAll(filepath.Join(upstreamDir, ".git"))
 	}
 
-	_ = os.RemoveAll(overlayDir)
-	if err := copyDirTree(filepath.Join(upstreamDir, "src"), filepath.Join(overlayDir, "src")); err != nil {
-		return "", fmt.Errorf("copy zwasm src to overlay %s: %w", overlayDir, err)
+	patchesByFile := make(map[string][]zwasmPatch)
+	for _, p := range zwasmOverlayPatches() {
+		patchesByFile[p.file] = append(patchesByFile[p.file], p)
 	}
 
-	for idx, p := range zwasmOverlayPatches() {
-		target := filepath.Join(overlayDir, filepath.FromSlash(p.file))
-		raw, err := os.ReadFile(target)
-		if err != nil {
-			return "", fmt.Errorf("read zwasm overlay file %s: %w", target, err)
+	upstreamSrc := filepath.Join(upstreamDir, "src")
+	overlaySrc := filepath.Join(overlayDir, "src")
+	err := filepath.WalkDir(upstreamSrc, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		content := strings.ReplaceAll(string(raw), "\r\n", "\n")
-		if !strings.Contains(content, p.old) {
-			return "", fmt.Errorf("zwasm overlay patch #%d target not found in %s:\n%s", idx, p.file, p.old)
-		}
-		updated := strings.ReplaceAll(content, p.old, p.new)
-		if err := os.WriteFile(target, []byte(updated), 0o644); err != nil {
-			return "", fmt.Errorf("write zwasm overlay file %s: %w", target, err)
-		}
-	}
-
-	return filepath.Join(overlayDir, "src", "zwasm.zig"), nil
-}
-
-func copyDirTree(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		rel, err := filepath.Rel(upstreamSrc, path)
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
+		target := filepath.Join(overlaySrc, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		in, err := os.Open(path)
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		defer in.Close()
-		out, err := os.Create(target)
-		if err != nil {
-			return err
+		relKey := "src/" + filepath.ToSlash(rel)
+		if plist, ok := patchesByFile[relKey]; ok {
+			content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+			for idx, p := range plist {
+				if !strings.Contains(content, p.old) {
+					return fmt.Errorf("zwasm overlay patch #%d target not found in %s:\n%s", idx, p.file, p.old)
+				}
+				content = strings.ReplaceAll(content, p.old, p.new)
+			}
+			raw = []byte(content)
 		}
-		defer out.Close()
-		_, err = io.Copy(out, in)
-		return err
+		return writeFileIfChanged(target, raw, 0o644)
 	})
+	if err != nil {
+		return "", fmt.Errorf("prepare zwasm overlay %s: %w", overlayDir, err)
+	}
+
+	return filepath.Join(overlaySrc, "zwasm.zig"), nil
 }

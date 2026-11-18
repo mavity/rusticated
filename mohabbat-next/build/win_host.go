@@ -144,6 +144,19 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 		platform = "anycpu"
 	}
 
+	if outInfo, err := os.Stat(outExePath); err == nil && outInfo.Size() > 0 {
+		upToDate := true
+		for _, dep := range []string{programCs, manifest, filepath.Join(depsDir, "ZstdSharp.dll")} {
+			if depInfo, depErr := os.Stat(dep); depErr != nil || depInfo.ModTime().After(outInfo.ModTime()) {
+				upToDate = false
+				break
+			}
+		}
+		if upToDate {
+			return nil
+		}
+	}
+
 	args := []string{
 		"/nologo",
 		"/unsafe",
