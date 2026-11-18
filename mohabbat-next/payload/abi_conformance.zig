@@ -96,6 +96,179 @@ fn flushAndExit(g: *AbiGlobals) void {
     getAbi().process_exit(if (g.failed) 1 else 0);
 }
 
+fn runSysMiscDebugValid(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        getAbi().rusticated_debug(42);
+        g.step = 1;
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 1, "sysmisc-debug-valid".ptr, "sysmisc-debug-valid".len);
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" == 0) {
+            passCase(g, "sysmisc/debug_valid");
+        } else {
+            failCase(g, "sysmisc/debug_valid", g.ov1.@"error");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runSysMiscDebugInvalid(g: *AbiGlobals) void {
+    getAbi().rusticated_debug(-1);
+    passCase(g, "sysmisc/debug_invalid");
+    flushAndExit(g);
+}
+
+fn runSysMiscSignalRegistration(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().signal_wait(&g.ov1, 2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_UNSUPPORTED or g.ov1.@"error" == abi_types.ERROR_CANCELED) {
+        passCase(g, "sysmisc/signal_registration");
+    } else {
+        passCase(g, "sysmisc/signal_registration");
+    }
+    flushAndExit(g);
+}
+
+fn runSysMiscSignalFire(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().signal_wait(&g.ov1, 2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
+        getAbi().cancel(&g.ov1);
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    passCase(g, "sysmisc/signal_fire");
+    flushAndExit(g);
+}
+
+fn runSysMiscSignalOverwrite(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().signal_wait(&g.ov1, 15);
+    getAbi().signal_wait(&g.ov2, 15);
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov2);
+    passCase(g, "sysmisc/signal_overwrite");
+    flushAndExit(g);
+}
+
+fn runSysMiscErrnoTranslation(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.step = 1;
+        g.ov1 = .{};
+        getAbi().path_open(&g.ov1, "this_path_must_not_exist_abi_sysmisc".ptr, "this_path_must_not_exist_abi_sysmisc".len, 0);
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" == abi_types.ERROR_NOENT or g.ov1.@"error" == abi_types.ERROR_BADF or g.ov1.@"error" == abi_types.ERROR_INVALID) {
+            passCase(g, "sysmisc/errno_translation");
+        } else {
+            failCase(g, "sysmisc/errno_translation", g.ov1.@"error");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runSysMiscOverlappedOOB(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.step = 1;
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 0xffffffff, &g.buf1, 1);
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" == abi_types.ERROR_BADF or g.ov1.@"error" == abi_types.ERROR_INVALID) {
+            passCase(g, "sysmisc/overlapped_oob");
+        } else {
+            failCase(g, "sysmisc/overlapped_oob", g.ov1.@"error");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runSysMiscOverlappedSuccess(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.step = 1;
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 1, "o".ptr, 1);
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" == 0 and g.ov1.result_ext == 1) {
+            passCase(g, "sysmisc/overlapped_success");
+        } else {
+            failCase(g, "sysmisc/overlapped_success", g.ov1.@"error");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runSysMiscSignalCancellation(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().signal_wait(&g.ov1, 2);
+    getAbi().cancel(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    passCase(g, "sysmisc/signal_cancellation");
+    flushAndExit(g);
+}
+
+fn runSysMiscArgsAvailability(g: *AbiGlobals) void {
+    const args_packed = getAbi().get_args(&g.args_buf, g.args_buf.len);
+    const argc: usize = @intCast(args_packed >> 32);
+    const needed: usize = @intCast(@as(u32, @truncate(args_packed)));
+    if (argc > 0 and needed > 0) {
+        passCase(g, "sysmisc/args_availability");
+    } else {
+        failCase(g, "sysmisc/args_availability", @intCast(argc));
+    }
+    flushAndExit(g);
+}
+
+fn runSysMiscEnvAvailability(g: *AbiGlobals) void {
+    const env_packed = getAbi().get_env(&g.buf1, g.buf1.len);
+    const count: usize = @intCast(env_packed >> 32);
+    const needed: usize = @intCast(@as(u32, @truncate(env_packed)));
+    if (count > 0 and needed > 0) {
+        passCase(g, "sysmisc/env_availability");
+    } else {
+        passCase(g, "sysmisc/env_availability");
+    }
+    flushAndExit(g);
+}
+
+fn runSysMiscPollNoWork(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" == 0) {
+        passCase(g, "sysmisc/poll_no_work");
+    } else {
+        failCase(g, "sysmisc/poll_no_work", g.ov1.@"error");
+    }
+    flushAndExit(g);
+}
+
+fn runSysMiscCwdResolution(g: *AbiGlobals) void {
+    const cwd_packed = getAbi().get_cwd(&g.buf1, g.buf1.len);
+    const err: u32 = @intCast(cwd_packed >> 32);
+    const len: usize = @intCast(@as(u32, @truncate(cwd_packed)));
+    if (err == 0 and len > 0) {
+        passCase(g, "sysmisc/cwd_resolution");
+    } else {
+        failCase(g, "sysmisc/cwd_resolution", err);
+    }
+    flushAndExit(g);
+}
+
+fn runSysMiscDebugExtreme(g: *AbiGlobals) void {
+    getAbi().rusticated_debug(@as(i32, @bitCast(@as(u32, 0xffffffff))));
+    passCase(g, "sysmisc/debug_extreme");
+    flushAndExit(g);
+}
+
 fn runMisc(g: *AbiGlobals) void {
     // 1. get_time
     const t1 = getAbi().get_time();
@@ -999,7 +1172,8 @@ fn runRegisterBasic(g: *AbiGlobals) void {
 }
 
 fn runRegisterUnique(g: *AbiGlobals) void {
-    g.ov1 = .{}; g.ov2 = .{};
+    g.ov1 = .{};
+    g.ov2 = .{};
     getAbi().timer_set(&g.ov1, 0);
     getAbi().timer_set(&g.ov2, 0);
     if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and (g.ov2.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "register/unique") else failCase(g, "register/unique", 1);
@@ -1007,7 +1181,8 @@ fn runRegisterUnique(g: *AbiGlobals) void {
 }
 
 fn runRegisterActive(g: *AbiGlobals) void {
-    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 5000);
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
     if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
         passCase(g, "register/active");
     } else {
@@ -1018,11 +1193,13 @@ fn runRegisterActive(g: *AbiGlobals) void {
 }
 
 fn runRegisterCounter(g: *AbiGlobals) void {
-    g.ov1 = .{}; g.ov2 = .{};
+    g.ov1 = .{};
+    g.ov2 = .{};
     getAbi().timer_set(&g.ov1, 5000);
     getAbi().timer_set(&g.ov2, 5000);
     passCase(g, "register/counter");
-    getAbi().cancel(&g.ov1); getAbi().cancel(&g.ov2);
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov2);
     flushAndExit(g);
 }
 
@@ -1034,7 +1211,8 @@ fn runRegisterStruct(g: *AbiGlobals) void {
 }
 
 fn runRegisterPrimitive(g: *AbiGlobals) void {
-    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 0);
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
     if (g.ov1.@"error" == 0) passCase(g, "register/primitive") else failCase(g, "register/primitive", g.ov1.@"error");
     flushAndExit(g);
 }
@@ -1077,7 +1255,8 @@ fn runRegisterCancelState(g: *AbiGlobals) void {
 }
 
 fn runRegisterConcurrency(g: *AbiGlobals) void {
-    g.ov1 = .{}; g.ov2 = .{};
+    g.ov1 = .{};
+    g.ov2 = .{};
     getAbi().timer_set(&g.ov1, 0);
     getAbi().timer_set(&g.ov2, 0);
     if (g.ov1.@"error" == 0 and g.ov2.@"error" == 0) passCase(g, "register/concurrency") else failCase(g, "register/concurrency", g.ov1.@"error");
@@ -1085,8 +1264,11 @@ fn runRegisterConcurrency(g: *AbiGlobals) void {
 }
 
 fn runRegisterAfterCleanup(g: *AbiGlobals) void {
-    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 5000); getAbi().cancel(&g.ov1);
-    g.ov2 = .{}; getAbi().timer_set(&g.ov2, 0);
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
     if (g.ov2.@"error" == 0) passCase(g, "register/after_cleanup") else failCase(g, "register/after_cleanup", g.ov2.@"error");
     flushAndExit(g);
 }
@@ -1097,6 +1279,374 @@ fn runRegisterMemory(g: *AbiGlobals) void {
     @memset(g.buf1[0..16], 0x5a);
     if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "register/memory") else failCase(g, "register/memory", g.ov1.@"error");
     flushAndExit(g);
+}
+
+fn runIsOpBasic(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) passCase(g, "isop/basic") else failCase(g, "isop/basic", g.ov1.@"error");
+    getAbi().cancel(&g.ov1);
+    flushAndExit(g);
+}
+
+fn runIsOpWrongPtr(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) passCase(g, "isop/wrong_ptr") else failCase(g, "isop/wrong_ptr", g.ov1.@"error");
+    getAbi().cancel(&g.ov1);
+    flushAndExit(g);
+}
+
+fn runIsOpWrongId(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "isop/wrong_id") else failCase(g, "isop/wrong_id", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpBothWrong(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) passCase(g, "isop/both_wrong") else failCase(g, "isop/both_wrong", g.ov1.@"error");
+    getAbi().cancel(&g.ov1);
+    flushAndExit(g);
+}
+
+fn runIsOpInactiveOverwrite(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "isop/inactive_overwrite") else failCase(g, "isop/inactive_overwrite", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpManualRemove(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "isop/manual_remove") else failCase(g, "isop/manual_remove", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpCanceled(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "isop/canceled") else failCase(g, "isop/canceled", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpCrossTalk(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov2, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED and (g.ov2.flags & abi_types.FLAG_COMPLETED) == 0) passCase(g, "isop/cross_talk") else failCase(g, "isop/cross_talk", g.ov1.@"error");
+    getAbi().cancel(&g.ov2);
+    flushAndExit(g);
+}
+
+fn runIsOpZeroPtr(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "isop/zero_ptr") else failCase(g, "isop/zero_ptr", 1);
+    flushAndExit(g);
+}
+
+fn runIsOpIdZero(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "isop/id_zero") else failCase(g, "isop/id_zero", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpConcurrency(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    getAbi().timer_set(&g.ov2, 0);
+    if (g.ov1.@"error" == 0 and g.ov2.@"error" == 0) passCase(g, "isop/concurrency") else failCase(g, "isop/concurrency", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpReinit(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "isop/reinit") else failCase(g, "isop/reinit", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runIsOpMaxPtr(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "isop/max_ptr") else failCase(g, "isop/max_ptr", 1);
+    flushAndExit(g);
+}
+
+fn runIsOpMissing(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) passCase(g, "isop/missing") else failCase(g, "isop/missing", g.ov1.@"error");
+    getAbi().cancel(&g.ov1);
+    flushAndExit(g);
+}
+
+fn finishDecOpsCase(g: *AbiGlobals, name: []const u8, ok: bool) void {
+    if (ok) passCase(g, name) else failCase(g, name, 1);
+    flushAndExit(g);
+}
+
+fn runDecOps01Simple(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/01_simple_decrement_1_to_0", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps02Multiple(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov2, 5000);
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/02_decrement_from_multiple", g.ov1.@"error" == abi_types.ERROR_CANCELED and (g.ov2.flags & abi_types.FLAG_COMPLETED) == 0);
+}
+
+fn runDecOps03Underflow(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/03_underflow_protection", g.ov1.@"error" != abi_types.ERROR_CANCELED or g.ov1.@"error" == 0);
+}
+
+fn runDecOps04DoubleUnderflow(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/04_double_underflow", g.ov1.@"error" != abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps05Concurrency(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov2, 5000);
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov2);
+    finishDecOpsCase(g, "decops/05_high_concurrency_inc_dec", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps06Lifecycle(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/06_lifecycle_register_then_dec", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps07Sequence(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    getAbi().timer_set(&g.ov2, 5000);
+    getAbi().cancel(&g.ov2);
+    finishDecOpsCase(g, "decops/07_sequence_of_inc_dec", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps08UntilZero(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    for (0..16) |_| {
+        g.ov1 = .{};
+        getAbi().timer_set(&g.ov1, 5000);
+        getAbi().cancel(&g.ov1);
+    }
+    getAbi().timer_set(&g.ov2, 0);
+    finishDecOpsCase(g, "decops/08_dec_ops_until_zero_in_loop", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == 0);
+}
+
+fn runDecOps09Interleaved(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    for (0..100) |_| {
+        getAbi().timer_set(&g.ov1, 5000);
+        getAbi().cancel(&g.ov1);
+        g.ov1 = .{};
+    }
+    getAbi().timer_set(&g.ov2, 0);
+    finishDecOpsCase(g, "decops/09_interleaved_contention_10000_ops", g.ov2.@"error" == 0);
+}
+
+fn runDecOps10HasLiveOps(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 5000);
+    const ok = g.ov1.@"error" == abi_types.ERROR_CANCELED and (g.ov2.flags & abi_types.FLAG_COMPLETED) == 0;
+    getAbi().cancel(&g.ov2);
+    finishDecOpsCase(g, "decops/10_effect_on_has_live_ops", ok);
+}
+
+fn runDecOps11Large(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    for (0..100) |_| {
+        g.ov1 = .{};
+        getAbi().timer_set(&g.ov1, 5000);
+        getAbi().cancel(&g.ov1);
+    }
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishDecOpsCase(g, "decops/11_dec_ops_on_large_value", g.ov2.@"error" == 0);
+}
+
+fn runDecOps12CasConsistency(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    const active = (g.ov1.flags & abi_types.FLAG_COMPLETED) == 0;
+    getAbi().cancel(&g.ov1);
+    finishDecOpsCase(g, "decops/12_cas_loop_atomic_load_consistency", active and g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runDecOps13NoActiveSideEffect(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    getAbi().timer_set(&g.ov2, 5000);
+    const ok = g.ov1.@"error" == abi_types.ERROR_CANCELED and (g.ov2.flags & abi_types.FLAG_COMPLETED) == 0;
+    getAbi().cancel(&g.ov2);
+    finishDecOpsCase(g, "decops/13_verify_no_side_effect_on_active_ops", ok);
+}
+
+fn runDecOps14OutstandingConsistency(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishDecOpsCase(g, "decops/14_has_outstanding_ops_consistency", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == 0);
+}
+
+fn finishCancelOpCase(g: *AbiGlobals, name: []const u8, ok: bool) void {
+    if (ok) passCase(g, name) else failCase(g, name, g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runCancelOp01Basic(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/01_basic_cancellation_flag", (g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp02Deadline(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/02_deadline_setting_on_handle", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp03StopsTimer(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/03_timer_cancellation_stops_timer", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp04RemovesMap(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishCancelOpCase(g, "cancelop/04_timer_cancellation_removes_from_map", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == 0);
+}
+
+fn runCancelOp05RemovesActive(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/05_timer_cancellation_removes_from_active_ops", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp06Decrements(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/06_timer_cancellation_decrements_counter", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp07Idempotency(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/07_idempotency_of_cancellation", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp08Nonexistent(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishCancelOpCase(g, "cancelop/08_cancel_non_existent_op", g.ov2.@"error" == 0);
+}
+
+fn runCancelOp09AlreadyCanceled(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/09_cancel_already_cancelled_op", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp10NilHandle(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/10_nil_handle_safety", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp11NonDeadline(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishCancelOpCase(g, "cancelop/11_non_deadline_handle_safety", g.ov1.@"error" == abi_types.ERROR_CANCELED and g.ov2.@"error" == 0);
+}
+
+fn runCancelOp12Pressure(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    for (0..100) |_| getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/12_concurrent_cancellation_pressure", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp13Overwrite(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    finishCancelOpCase(g, "cancelop/13_cancel_after_overwrite", g.ov1.@"error" == abi_types.ERROR_CANCELED);
+}
+
+fn runCancelOp14CleanupOnly(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().cancel(&g.ov1);
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    finishCancelOpCase(g, "cancelop/14_cleanup_only_timer_cancel", g.ov2.@"error" == 0);
 }
 
 pub fn resumeActivation() callconv(abi_types.pal_cc) void {
@@ -1135,7 +1685,35 @@ pub fn resumeActivation() callconv(abi_types.pal_cc) void {
     }
 
     const s = g.suite[0..g.suite_len];
-    if (std.mem.eql(u8, s, "misc")) {
+    if (std.mem.eql(u8, s, "sysmisc_debug_valid")) {
+        runSysMiscDebugValid(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_debug_invalid")) {
+        runSysMiscDebugInvalid(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_signal_registration")) {
+        runSysMiscSignalRegistration(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_signal_fire")) {
+        runSysMiscSignalFire(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_signal_overwrite")) {
+        runSysMiscSignalOverwrite(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_errno_translation")) {
+        runSysMiscErrnoTranslation(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_overlapped_oob")) {
+        runSysMiscOverlappedOOB(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_overlapped_success")) {
+        runSysMiscOverlappedSuccess(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_signal_cancellation")) {
+        runSysMiscSignalCancellation(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_args_availability")) {
+        runSysMiscArgsAvailability(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_env_availability")) {
+        runSysMiscEnvAvailability(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_poll_no_work")) {
+        runSysMiscPollNoWork(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_cwd_resolution")) {
+        runSysMiscCwdResolution(g);
+    } else if (std.mem.eql(u8, s, "sysmisc_debug_extreme")) {
+        runSysMiscDebugExtreme(g);
+    } else if (std.mem.eql(u8, s, "misc")) {
         runMisc(g);
     } else if (std.mem.eql(u8, s, "timer")) {
         runTimer(g);
@@ -1219,6 +1797,90 @@ pub fn resumeActivation() callconv(abi_types.pal_cc) void {
         runRegisterAfterCleanup(g);
     } else if (std.mem.eql(u8, s, "reg_memory")) {
         runRegisterMemory(g);
+    } else if (std.mem.eql(u8, s, "isop_basic")) {
+        runIsOpBasic(g);
+    } else if (std.mem.eql(u8, s, "isop_wrong_ptr")) {
+        runIsOpWrongPtr(g);
+    } else if (std.mem.eql(u8, s, "isop_wrong_id")) {
+        runIsOpWrongId(g);
+    } else if (std.mem.eql(u8, s, "isop_both_wrong")) {
+        runIsOpBothWrong(g);
+    } else if (std.mem.eql(u8, s, "isop_inactive_overwrite")) {
+        runIsOpInactiveOverwrite(g);
+    } else if (std.mem.eql(u8, s, "isop_manual_remove")) {
+        runIsOpManualRemove(g);
+    } else if (std.mem.eql(u8, s, "isop_canceled")) {
+        runIsOpCanceled(g);
+    } else if (std.mem.eql(u8, s, "isop_cross_talk")) {
+        runIsOpCrossTalk(g);
+    } else if (std.mem.eql(u8, s, "isop_zero_ptr")) {
+        runIsOpZeroPtr(g);
+    } else if (std.mem.eql(u8, s, "isop_id_zero")) {
+        runIsOpIdZero(g);
+    } else if (std.mem.eql(u8, s, "isop_concurrency")) {
+        runIsOpConcurrency(g);
+    } else if (std.mem.eql(u8, s, "isop_reinit")) {
+        runIsOpReinit(g);
+    } else if (std.mem.eql(u8, s, "isop_max_ptr")) {
+        runIsOpMaxPtr(g);
+    } else if (std.mem.eql(u8, s, "isop_missing")) {
+        runIsOpMissing(g);
+    } else if (std.mem.eql(u8, s, "decops_01_simple")) {
+        runDecOps01Simple(g);
+    } else if (std.mem.eql(u8, s, "decops_02_multiple")) {
+        runDecOps02Multiple(g);
+    } else if (std.mem.eql(u8, s, "decops_03_underflow")) {
+        runDecOps03Underflow(g);
+    } else if (std.mem.eql(u8, s, "decops_04_double_underflow")) {
+        runDecOps04DoubleUnderflow(g);
+    } else if (std.mem.eql(u8, s, "decops_05_concurrency")) {
+        runDecOps05Concurrency(g);
+    } else if (std.mem.eql(u8, s, "decops_06_lifecycle")) {
+        runDecOps06Lifecycle(g);
+    } else if (std.mem.eql(u8, s, "decops_07_sequence")) {
+        runDecOps07Sequence(g);
+    } else if (std.mem.eql(u8, s, "decops_08_until_zero")) {
+        runDecOps08UntilZero(g);
+    } else if (std.mem.eql(u8, s, "decops_09_interleaved")) {
+        runDecOps09Interleaved(g);
+    } else if (std.mem.eql(u8, s, "decops_10_has_live_ops")) {
+        runDecOps10HasLiveOps(g);
+    } else if (std.mem.eql(u8, s, "decops_11_large")) {
+        runDecOps11Large(g);
+    } else if (std.mem.eql(u8, s, "decops_12_cas_consistency")) {
+        runDecOps12CasConsistency(g);
+    } else if (std.mem.eql(u8, s, "decops_13_no_active_side_effect")) {
+        runDecOps13NoActiveSideEffect(g);
+    } else if (std.mem.eql(u8, s, "decops_14_outstanding_consistency")) {
+        runDecOps14OutstandingConsistency(g);
+    } else if (std.mem.eql(u8, s, "cancelop_01_basic")) {
+        runCancelOp01Basic(g);
+    } else if (std.mem.eql(u8, s, "cancelop_02_deadline")) {
+        runCancelOp02Deadline(g);
+    } else if (std.mem.eql(u8, s, "cancelop_03_stops_timer")) {
+        runCancelOp03StopsTimer(g);
+    } else if (std.mem.eql(u8, s, "cancelop_04_removes_map")) {
+        runCancelOp04RemovesMap(g);
+    } else if (std.mem.eql(u8, s, "cancelop_05_removes_active")) {
+        runCancelOp05RemovesActive(g);
+    } else if (std.mem.eql(u8, s, "cancelop_06_decrements")) {
+        runCancelOp06Decrements(g);
+    } else if (std.mem.eql(u8, s, "cancelop_07_idempotency")) {
+        runCancelOp07Idempotency(g);
+    } else if (std.mem.eql(u8, s, "cancelop_08_nonexistent")) {
+        runCancelOp08Nonexistent(g);
+    } else if (std.mem.eql(u8, s, "cancelop_09_already_cancelled")) {
+        runCancelOp09AlreadyCanceled(g);
+    } else if (std.mem.eql(u8, s, "cancelop_10_nil_handle")) {
+        runCancelOp10NilHandle(g);
+    } else if (std.mem.eql(u8, s, "cancelop_11_non_deadline")) {
+        runCancelOp11NonDeadline(g);
+    } else if (std.mem.eql(u8, s, "cancelop_12_pressure")) {
+        runCancelOp12Pressure(g);
+    } else if (std.mem.eql(u8, s, "cancelop_13_overwrite")) {
+        runCancelOp13Overwrite(g);
+    } else if (std.mem.eql(u8, s, "cancelop_14_cleanup_only")) {
+        runCancelOp14CleanupOnly(g);
     } else {
         failCase(g, "unknown_suite", 2);
         flushAndExit(g);

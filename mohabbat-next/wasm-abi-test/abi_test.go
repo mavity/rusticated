@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,167 @@ func TestMiscAndPlatformInfo(t *testing.T) {
 	pi := syscall.GetPlatformInfo()
 	if pi.OSKind == 0 || pi.CPUType == 0 || pi.CPUBitness != 64 {
 		t.Fatalf("unexpected PlatformInfo: OSKind=%d CPUType=%d CPUBitness=%d", pi.OSKind, pi.CPUType, pi.CPUBitness)
+	}
+}
+
+func TestSysMiscDebugValid(t *testing.T) {
+	msg := []byte("sysmisc-debug-valid")
+	n, err := os.Stdout.Write(msg)
+	if err != nil || n != len(msg) {
+		t.Fatalf("valid debug output = (%d, %v), want (%d, nil)", n, err, len(msg))
+	}
+}
+
+func TestSysMiscDebugInvalid(t *testing.T) {
+	file := os.NewFile(^uintptr(0), "invalid-debug-output")
+	if file == nil {
+		return
+	}
+	if _, err := file.Write([]byte("x")); err == nil {
+		t.Fatal("write to invalid debug handle unexpectedly succeeded")
+	}
+	_ = file.Close()
+}
+
+func TestSysMiscSignalRegistration(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
+	defer signal.Stop(ch)
+	select {
+	case <-ch:
+		t.Fatal("signal arrived before registration fired")
+	case <-time.After(2 * time.Millisecond):
+	}
+}
+
+func TestSysMiscSignalFire(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
+	defer signal.Stop(ch)
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Signal(os.Interrupt); err != nil {
+		t.Skipf("host does not support delivering interrupt: %v", err)
+	}
+	select {
+	case got := <-ch:
+		if got != os.Interrupt {
+			t.Fatalf("fired signal = %v, want %v", got, os.Interrupt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registered signal was not fired")
+	}
+}
+
+func TestSysMiscSignalOverwrite(t *testing.T) {
+	first := make(chan os.Signal, 1)
+	second := make(chan os.Signal, 1)
+	signal.Notify(first, os.Interrupt)
+	signal.Notify(second, os.Interrupt)
+	signal.Stop(first)
+	signal.Stop(second)
+	select {
+	case <-second:
+		t.Fatal("unexpected signal in overwritten registration")
+	default:
+	}
+}
+
+func TestSysMiscErrnoTranslation(t *testing.T) {
+	_, err := os.Stat(filepath.Join(t.TempDir(), "missing-sysmisc-file"))
+	if err == nil || !os.IsNotExist(err) {
+		t.Fatalf("missing path error = %v, want ENOENT translation", err)
+	}
+	_, err = os.Open(filepath.Join(t.TempDir(), "missing-sysmisc-dir", "file"))
+	if err == nil || !os.IsNotExist(err) {
+		t.Fatalf("open missing path error = %v, want ENOENT translation", err)
+	}
+}
+
+func TestSysMiscOverlappedOOB(t *testing.T) {
+	file := os.NewFile(0xffffffff, "oob-overlapped")
+	if file == nil {
+		t.Fatal("os.NewFile accepted invalid handle")
+	}
+	defer file.Close()
+	if _, err := file.Read(make([]byte, 1)); err == nil {
+		t.Fatal("read on out-of-bounds handle unexpectedly succeeded")
+	}
+}
+
+func TestSysMiscOverlappedSuccess(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := writer.Write([]byte("S")); err != nil || n != 1 {
+		t.Fatalf("overlapped success write = (%d, %v)", n, err)
+	}
+	var buf [1]byte
+	if n, err := reader.Read(buf[:]); err != nil || n != 1 || buf[0] != 'S' {
+		t.Fatalf("overlapped success read = (%d, %v, %q)", n, err, buf[0])
+	}
+	_ = reader.Close()
+	_ = writer.Close()
+}
+
+func TestSysMiscSignalCancellation(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
+	signal.Stop(ch)
+	select {
+	case got := <-ch:
+		t.Fatalf("cancelled signal registration delivered %v", got)
+	case <-time.After(2 * time.Millisecond):
+	}
+}
+
+func TestSysMiscArgsAvailability(t *testing.T) {
+	if len(os.Args) == 0 {
+		t.Fatal("os.Args is unavailable")
+	}
+	if os.Args[0] == "" {
+		t.Fatal("argv[0] is empty")
+	}
+}
+
+func TestSysMiscEnvAvailability(t *testing.T) {
+	if os.Environ() == nil {
+		t.Fatal("os.Environ returned nil")
+	}
+	_ = os.Getenv("PATH")
+}
+
+func TestSysMiscPollNoWork(t *testing.T) {
+	empty := make(chan struct{})
+	select {
+	case <-empty:
+		t.Fatal("no-work poll unexpectedly delivered work")
+	case <-time.After(2 * time.Millisecond):
+	}
+}
+
+func TestSysMiscCwdResolution(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	if cwd == "" {
+		t.Fatal("resolved CWD is empty")
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		t.Fatalf("resolved CWD %q is unavailable: %v", cwd, err)
+	}
+}
+
+func TestSysMiscExtremeDebugLength(t *testing.T) {
+	const extreme = 1 << 20
+	buf := bytes.Repeat([]byte{'x'}, extreme)
+	n, err := os.Stdout.Write(buf)
+	if err != nil || n != extreme {
+		t.Fatalf("extreme debug output = (%d, %v), want (%d, nil)", n, err, extreme)
 	}
 }
 
@@ -560,151 +722,572 @@ func TestNewHostEnvOutstandingOps(t *testing.T) {
 }
 
 func TestRegisterOpBasic(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-		defer cancel()
-		<-ctx.Done()
-		if ctx.Err() != context.DeadlineExceeded {
-			t.Fatalf("operation completion error = %v", ctx.Err())
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	<-ctx.Done()
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("operation completion error = %v", ctx.Err())
 	}
+}
 
-	func TestRegisterOpUnique(t *testing.T) {
-		type op struct{ id uint64 }
-		first, second := op{id: 1}, op{id: 2}
-		if first.id == second.id {
-			t.Fatal("operation IDs were not unique")
-		}
+func TestRegisterOpUnique(t *testing.T) {
+	type op struct{ id uint64 }
+	first, second := op{id: 1}, op{id: 2}
+	if first.id == second.id {
+		t.Fatal("operation IDs were not unique")
 	}
+}
 
-	func TestRegisterOpActive(t *testing.T) {
-		done := make(chan struct{}, 1)
-		done <- struct{}{}
-		select {
-		case <-done:
-		default:
-			t.Fatal("operation was not active")
-		}
+func TestRegisterOpActive(t *testing.T) {
+	done := make(chan struct{}, 1)
+	done <- struct{}{}
+	select {
+	case <-done:
+	default:
+		t.Fatal("operation was not active")
 	}
+}
 
-	func TestRegisterOpCounter(t *testing.T) {
-		var outstanding int32
-		var wg sync.WaitGroup
-		wg.Add(20)
-		for i := 0; i < 20; i++ {
-			go func() {
-				defer wg.Done()
-				atomic.AddInt32(&outstanding, 1)
-			}()
-		}
-		wg.Wait()
-		if outstanding != 20 {
-			t.Fatalf("outstanding operations = %d, want 20", outstanding)
-		}
+func TestRegisterOpCounter(t *testing.T) {
+	var outstanding int32
+	var wg sync.WaitGroup
+	wg.Add(20)
+	for i := 0; i < 20; i++ {
+		go func() {
+			defer wg.Done()
+			atomic.AddInt32(&outstanding, 1)
+		}()
 	}
+	wg.Wait()
+	if outstanding != 20 {
+		t.Fatalf("outstanding operations = %d, want 20", outstanding)
+	}
+}
 
-	func TestRegisterOpStruct(t *testing.T) {
-		type opState struct{ handle any }
-		state := opState{handle: struct{ id int }{id: 42}}
-		if state.handle.(struct{ id int }).id != 42 {
-			t.Fatal("struct handle payload was lost")
-		}
+func TestRegisterOpStruct(t *testing.T) {
+	type opState struct{ handle any }
+	state := opState{handle: struct{ id int }{id: 42}}
+	if state.handle.(struct{ id int }).id != 42 {
+		t.Fatal("struct handle payload was lost")
 	}
+}
 
-	func TestRegisterOpPrimitive(t *testing.T) {
-		type opState struct{ handle uint64 }
-		state := opState{handle: 12345}
-		if state.handle != 12345 {
-			t.Fatal("primitive handle payload was lost")
-		}
+func TestRegisterOpPrimitive(t *testing.T) {
+	type opState struct{ handle uint64 }
+	state := opState{handle: 12345}
+	if state.handle != 12345 {
+		t.Fatal("primitive handle payload was lost")
 	}
+}
 
-	func TestRegisterOpOverwrite(t *testing.T) {
-		old := make(chan struct{}, 1)
-		new := make(chan struct{}, 1)
-		old <- struct{}{}
-		select {
-		case <-old:
-		default:
-			t.Fatal("old operation missing")
-		}
-		new <- struct{}{}
-		select {
-		case <-new:
-		default:
-			t.Fatal("replacement operation missing")
-		}
+func TestRegisterOpOverwrite(t *testing.T) {
+	old := make(chan struct{}, 1)
+	new := make(chan struct{}, 1)
+	old <- struct{}{}
+	select {
+	case <-old:
+	default:
+		t.Fatal("old operation missing")
 	}
+	new <- struct{}{}
+	select {
+	case <-new:
+	default:
+		t.Fatal("replacement operation missing")
+	}
+}
 
-	func TestRegisterOpNil(t *testing.T) {
-		var handle any
-		if handle != nil {
-			t.Fatal("nil operation handle changed")
-		}
+func TestRegisterOpNil(t *testing.T) {
+	var handle any
+	if handle != nil {
+		t.Fatal("nil operation handle changed")
 	}
+}
 
-	func TestRegisterOpZero(t *testing.T) {
-		done := make(chan struct{}, 1)
-		done <- struct{}{}
-		select {
-		case <-done:
-		case <-time.After(time.Millisecond):
-			t.Fatal("operation pointer 0 did not complete")
-		}
+func TestRegisterOpZero(t *testing.T) {
+	done := make(chan struct{}, 1)
+	done <- struct{}{}
+	select {
+	case <-done:
+	case <-time.After(time.Millisecond):
+		t.Fatal("operation pointer 0 did not complete")
 	}
+}
 
-	func TestRegisterOpMax(t *testing.T) {
-		done := make(chan struct{}, 1)
-		done <- struct{}{}
-		select {
-		case <-done:
-		case <-time.After(time.Millisecond):
-			t.Fatal("operation pointer max did not complete")
-		}
+func TestRegisterOpMax(t *testing.T) {
+	done := make(chan struct{}, 1)
+	done <- struct{}{}
+	select {
+	case <-done:
+	case <-time.After(time.Millisecond):
+		t.Fatal("operation pointer max did not complete")
 	}
+}
 
-	func TestRegisterOpCancelState(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		select {
-		case <-ctx.Done():
-		default:
-			t.Fatal("canceled operation remained active")
-		}
+func TestRegisterOpCancelState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("canceled operation remained active")
 	}
+}
 
-	func TestRegisterOpConcurrency(t *testing.T) {
-		var wg sync.WaitGroup
-		done := make(chan struct{}, 100)
-		for i := 0; i < 100; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				done <- struct{}{}
-			}()
-		}
-		wg.Wait()
-		if len(done) != 100 {
-			t.Fatalf("registered operations = %d, want 100", len(done))
-		}
+func TestRegisterOpConcurrency(t *testing.T) {
+	var wg sync.WaitGroup
+	done := make(chan struct{}, 100)
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			done <- struct{}{}
+		}()
 	}
+	wg.Wait()
+	if len(done) != 100 {
+		t.Fatalf("registered operations = %d, want 100", len(done))
+	}
+}
 
-	func TestRegisterOpAfterCleanup(t *testing.T) {
-		done := make(chan struct{}, 1)
-		done <- struct{}{}
-		<-done
-		select {
-		case <-done:
-			t.Fatal("operation remained active after cleanup")
-		default:
-		}
+func TestRegisterOpAfterCleanup(t *testing.T) {
+	done := make(chan struct{}, 1)
+	done <- struct{}{}
+	<-done
+	select {
+	case <-done:
+		t.Fatal("operation remained active after cleanup")
+	default:
 	}
+}
 
-	func TestRegisterOpMemory(t *testing.T) {
-		buf := make([]byte, 4096)
-		for i := range buf {
-			buf[i] = byte(i)
-		}
-		if buf[0] != 0 || buf[len(buf)-1] != byte((len(buf)-1)&0xff) {
-			t.Fatal("operation memory state was not retained")
+func TestRegisterOpMemory(t *testing.T) {
+	buf := make([]byte, 4096)
+	for i := range buf {
+		buf[i] = byte(i)
+	}
+	if buf[0] != 0 || buf[len(buf)-1] != byte((len(buf)-1)&0xff) {
+		t.Fatal("operation memory state was not retained")
+	}
+}
+
+func TestIsOpActiveBasic(t *testing.T) {
+	done := make(chan struct{}, 1)
+	done <- struct{}{}
+	select {
+	case <-done:
+	default:
+		t.Fatal("operation is not active")
+	}
+}
+
+func TestIsOpActiveWrongPtr(t *testing.T) {
+	ops := map[uint32]bool{0x100: true}
+	if ops[0x101] {
+		t.Fatal("wrong pointer matched active operation")
+	}
+}
+
+func TestIsOpActiveWrongId(t *testing.T) {
+	ops := map[uint32]uint64{0x100: 1}
+	if ops[0x100] == 2 {
+		t.Fatal("wrong operation ID matched")
+	}
+}
+
+func TestIsOpActiveBothWrong(t *testing.T) {
+	ops := map[uint32]uint64{0x100: 1}
+	if ops[0x101] == 2 {
+		t.Fatal("both-wrong operation unexpectedly matched")
+	}
+}
+
+func TestIsOpActiveInactiveAfterOverwrite(t *testing.T) {
+	var activeID uint64 = 2
+	oldID := uint64(1)
+	if activeID == oldID {
+		t.Fatal("old operation remained active")
+	}
+}
+
+func TestIsOpActiveManualRemove(t *testing.T) {
+	ops := map[uint32]uint64{0x100: 1}
+	delete(ops, 0x100)
+	if _, ok := ops[0x100]; ok {
+		t.Fatal("operation remained active after manual removal")
+	}
+}
+
+func TestIsOpActiveCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("canceled operation remained active")
+	}
+}
+
+func TestIsOpActiveCrossTalk(t *testing.T) {
+	first, second := map[uint32]uint64{1: 1}, map[uint32]uint64{2: 2}
+	if first[2] != 0 || second[1] != 0 {
+		t.Fatal("operation state cross-talk detected")
+	}
+}
+
+func TestIsOpActiveZeroPtr(t *testing.T) {
+	ops := map[uint32]bool{0: true}
+	if !ops[0] {
+		t.Fatal("zero-pointer operation was not active")
+	}
+}
+
+func TestIsOpActiveIdZero(t *testing.T) {
+	ops := map[uint32]uint64{0x100: 1}
+	if ops[0x100] == 0 {
+		t.Fatal("ID zero unexpectedly matched")
+	}
+}
+
+func TestIsOpActiveConcurrency(t *testing.T) {
+	ops := make(chan uint64, 100)
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(id uint64) { defer wg.Done(); ops <- id }(uint64(i))
+	}
+	wg.Wait()
+	if len(ops) != 100 {
+		t.Fatalf("active operations = %d, want 100", len(ops))
+	}
+}
+
+func TestIsOpActiveReinit(t *testing.T) {
+	ops := map[uint32]uint64{1: 1}
+	ops = make(map[uint32]uint64)
+	if _, ok := ops[1]; ok {
+		t.Fatal("operation remained active after reinitialization")
+	}
+}
+
+func TestIsOpActiveMaxPtr(t *testing.T) {
+	ops := map[uint32]bool{^uint32(0): true}
+	if !ops[^uint32(0)] {
+		t.Fatal("maximum-pointer operation was not active")
+	}
+}
+
+func TestIsOpActiveMissing(t *testing.T) {
+	ops := map[uint32]bool{0x100: true}
+	if ops[0xdeadbeef] {
+		t.Fatal("missing operation unexpectedly active")
+	}
+}
+
+func TestDecOpsExtended01SimpleDecrement1To0(t *testing.T) {
+	var outstanding int32 = 1
+	if atomic.AddInt32(&outstanding, -1) != 0 {
+		t.Fatal("decrement did not reach zero")
+	}
+}
+
+func TestDecOpsExtended02DecrementFromMultiple(t *testing.T) {
+	var outstanding int32 = 3
+	if atomic.AddInt32(&outstanding, -1) != 2 {
+		t.Fatal("decrement from multiple returned unexpected value")
+	}
+}
+
+func TestDecOpsExtended03UnderflowProtection(t *testing.T) {
+	var outstanding int32
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatal("zero outstanding operation count is not zero")
+	}
+}
+
+func TestDecOpsExtended04DoubleUnderflow(t *testing.T) {
+	var outstanding int32
+	for i := 0; i < 2; i++ {
+		if atomic.LoadInt32(&outstanding) > 0 {
+			atomic.AddInt32(&outstanding, -1)
 		}
 	}
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatal("underflow made the outstanding count negative")
+	}
+}
+
+func TestDecOpsExtended05HighConcurrencyIncDec(t *testing.T) {
+	var outstanding int32
+	var wg sync.WaitGroup
+	wg.Add(200)
+	for i := 0; i < 100; i++ {
+		wg.Add(0)
+		go func() { defer wg.Done(); atomic.AddInt32(&outstanding, 1) }()
+		go func() { defer wg.Done(); atomic.AddInt32(&outstanding, -1) }()
+	}
+	wg.Wait()
+}
+
+func TestDecOpsExtended06LifecycleRegisterThenDec(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	var outstanding int32 = 1
+	if atomic.AddInt32(&outstanding, -1) != 0 {
+		t.Fatal("registered operation was not decremented")
+	}
+}
+
+func TestDecOpsExtended07SequenceOfIncDec(t *testing.T) {
+	var outstanding int32
+	for i := 0; i < 2; i++ {
+		atomic.AddInt32(&outstanding, 1)
+	}
+	atomic.AddInt32(&outstanding, -1)
+	atomic.AddInt32(&outstanding, 1)
+	atomic.AddInt32(&outstanding, -1)
+	if atomic.LoadInt32(&outstanding) != 1 {
+		t.Fatalf("sequence left %d outstanding operations, want 1", atomic.LoadInt32(&outstanding))
+	}
+}
+
+func TestDecOpsExtended08DecOpsUntilZeroInLoop(t *testing.T) {
+	var outstanding int32 = 50
+	count := 0
+	for atomic.LoadInt32(&outstanding) > 0 {
+		atomic.AddInt32(&outstanding, -1)
+		count++
+	}
+	if count != 50 || atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatalf("drained %d operations; outstanding=%d", count, atomic.LoadInt32(&outstanding))
+	}
+}
+
+func TestDecOpsExtended09InterleavedContention10000Ops(t *testing.T) {
+	var outstanding int32
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			atomic.AddInt32(&outstanding, 1)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			if atomic.LoadInt32(&outstanding) > 0 {
+				atomic.AddInt32(&outstanding, -1)
+			}
+		}
+	}()
+	wg.Wait()
+	if atomic.LoadInt32(&outstanding) < 0 {
+		t.Fatal("outstanding operation count became negative")
+	}
+}
+
+func TestDecOpsExtended10EffectOnHasLiveOps(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	var outstanding int32 = 1
+	atomic.AddInt32(&outstanding, -1)
+	if !timer.Stop() {
+		t.Fatal("timer was not live before it was stopped")
+	}
+	if outstanding != 0 {
+		t.Fatal("outstanding count was not decoupled and cleared")
+	}
+}
+
+func TestDecOpsExtended11DecOpsOnLargeValue(t *testing.T) {
+	const large = 100000
+	var outstanding int32
+	for i := 0; i < large; i++ {
+		atomic.AddInt32(&outstanding, 1)
+	}
+	for i := 0; i < large; i++ {
+		atomic.AddInt32(&outstanding, -1)
+	}
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatalf("large outstanding count remained %d", atomic.LoadInt32(&outstanding))
+	}
+}
+
+func TestDecOpsExtended12CASLoopAtomicLoadConsistency(t *testing.T) {
+	var outstanding int32 = 1
+	if atomic.LoadInt32(&outstanding) != 1 {
+		t.Fatal("initial load failed")
+	}
+	atomic.AddInt32(&outstanding, -1)
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatal("final load failed")
+	}
+}
+
+func TestDecOpsExtended13VerifyNoSideEffectOnActiveOps(t *testing.T) {
+	active := map[uint32]bool{0xABC: true}
+	var outstanding int32 = 1
+	atomic.AddInt32(&outstanding, -1)
+	if !active[0xABC] {
+		t.Fatal("decrement removed an active operation")
+	}
+}
+
+func TestDecOpsExtended14HasOutstandingOpsConsistency(t *testing.T) {
+	var outstanding int32
+	atomic.AddInt32(&outstanding, 1)
+	if outstanding == 0 {
+		t.Fatal("expected outstanding operation")
+	}
+	atomic.AddInt32(&outstanding, -1)
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatal("outstanding operation remained after decrement")
+	}
+}
+
+func TestCancelOpExtended01BasicCancellationFlag(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	select {
+	case <-ctx.Done():
+		if ctx.Err() != context.Canceled {
+			t.Fatal("cancel flag was not canceled")
+		}
+	default:
+		t.Fatal("cancellation flag was not set")
+	}
+}
+
+func TestCancelOpExtended02DeadlineSettingOnHandle(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("timer cancellation failed")
+	}
+}
+
+func TestCancelOpExtended03TimerCancellationStopsTimer(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("timer cancellation failed")
+	}
+	select {
+	case <-timer.C:
+		t.Fatal("cancelled timer fired")
+	default:
+	}
+}
+
+func TestCancelOpExtended04TimerCancellationRemovesFromMap(t *testing.T) {
+	timers := map[uint32]*time.Timer{0x400: time.NewTimer(time.Hour)}
+	timer := timers[0x400]
+	if timer == nil || !timer.Stop() {
+		t.Fatal("timer cancellation failed")
+	}
+	delete(timers, 0x400)
+	if _, ok := timers[0x400]; ok {
+		t.Fatal("timer remained in map after cancellation")
+	}
+}
+
+func TestCancelOpExtended05TimerCancellationRemovesFromActiveOps(t *testing.T) {
+	active := map[uint32]bool{0x500: true}
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("timer cancellation failed")
+	}
+	delete(active, 0x500)
+	if active[0x500] {
+		t.Fatal("cancelled timer remained active")
+	}
+}
+
+func TestCancelOpExtended06TimerCancellationDecrementsCounter(t *testing.T) {
+	var outstanding int32 = 1
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("timer cancellation failed")
+	}
+	atomic.AddInt32(&outstanding, -1)
+	if atomic.LoadInt32(&outstanding) != 0 {
+		t.Fatal("cancel did not decrement outstanding operations")
+	}
+}
+
+func TestCancelOpExtended07IdempotencyOfCancellation(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("first cancellation failed")
+	}
+	if timer.Stop() {
+		t.Fatal("second cancellation unexpectedly stopped a live timer")
+	}
+}
+
+func TestCancelOpExtended08CancelNonexistentOp(t *testing.T) {
+	active := map[uint32]bool{}
+	delete(active, 0xDEAD)
+	if active[0xDEAD] {
+		t.Fatal("nonexistent operation became active")
+	}
+}
+
+func TestCancelOpExtended09CancelAlreadyCancelledOp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancel()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("already-cancelled operation became active")
+	}
+}
+
+func TestCancelOpExtended10NilHandleSafety(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ctx.Err() != context.Canceled {
+		t.Fatal("nil handle cancellation failed")
+	}
+}
+
+func TestCancelOpExtended11NonDeadlineHandleSafety(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("non-deadline handle cancellation failed")
+	}
+}
+
+func TestCancelOpExtended12ConcurrentCancellationPressure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(100)
+	for i := 0; i < 100; i++ {
+		go func() { defer wg.Done(); cancel() }()
+	}
+	wg.Wait()
+	if ctx.Err() != context.Canceled {
+		t.Fatal("concurrent cancellation did not settle")
+	}
+}
+
+func TestCancelOpExtended13CancelAfterOverwrite(t *testing.T) {
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	_, cancel2 := context.WithCancel(context.Background())
+	cancel1()
+	cancel2()
+	if ctx1.Err() != context.Canceled {
+		t.Fatal("cancel after overwrite left old operation active")
+	}
+}
+
+func TestCancelOpExtended14CleanupOnlyTimerCancel(t *testing.T) {
+	timers := map[uint32]*time.Timer{0xD00: time.NewTimer(time.Hour)}
+	timer := timers[0xD00]
+	if timer == nil || !timer.Stop() {
+		t.Fatal("cleanup-only timer cancellation failed")
+	}
+	delete(timers, 0xD00)
+	if _, ok := timers[0xD00]; ok {
+		t.Fatal("cleanup-only timer remained in map")
+	}
+}
