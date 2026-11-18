@@ -12,6 +12,8 @@ pub struct UnixPlatformHost {
     pub hello_payload_size: usize,
     pub argv: *const *const u8,
     pub argc: usize,
+    pub wasm_bytes: *const u8,
+    pub wasm_len: usize,
 }
 
 type PlatformEntry = unsafe extern "C" fn() -> i32;
@@ -174,105 +176,127 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     unlink(launcher_path);
 
     let bundle_idx = match_idx + 1;
-    if bundle_idx + 4 >= argc {
+    if bundle_idx + 3 >= argc {
         exit(101);
     }
 
     let bundle_path = *argv.add(bundle_idx);
-    let plat_off_str = *argv.add(bundle_idx + 1);
-    let plat_len_str = *argv.add(bundle_idx + 2);
-    let hello_off_str = *argv.add(bundle_idx + 3);
-    let hello_len_str = *argv.add(bundle_idx + 4);
+    let pool_off_str = *argv.add(bundle_idx + 1);
+    let pool_len_str = *argv.add(bundle_idx + 2);
+    let mode_str = *argv.add(bundle_idx + 3);
 
-    // 3. Parse component ranges
-    let plat_off = match parse_u64(plat_off_str) {
+    // 3. Parse pool range
+    let pool_off = match parse_u64(pool_off_str) {
         Some(v) => v as i64,
         None => exit(102),
     };
-    let plat_len = match parse_u64(plat_len_str) {
+    let pool_len = match parse_u64(pool_len_str) {
         Some(v) => v as usize,
         None => exit(103),
     };
-    let hello_off = match parse_u64(hello_off_str) {
-        Some(v) => v as i64,
-        None => exit(104),
-    };
-    let hello_len = match parse_u64(hello_len_str) {
-        Some(v) => v as usize,
-        None => exit(105),
-    };
-    let guest_args_idx = bundle_idx + 5;
-    let guest_argv = argv.add(guest_args_idx);
-    let guest_argc = argc - guest_args_idx;
+    let is_fileio = !mode_str.is_null()
+        && *mode_str == b'f'
+        && *mode_str.add(1) == b'i'
+        && *mode_str.add(2) == b'l'
+        && *mode_str.add(3) == b'e'
+        && *mode_str.add(4) == b'i'
+        && *mode_str.add(5) == b'o'
+        && *mode_str.add(6) == 0;
+    let guest_args_idx = bundle_idx + 4;
+    let raw_guest_argv = argv.add(guest_args_idx);
+    let raw_guest_argc = argc - guest_args_idx;
 
-    if plat_len == 0 || plat_len > 64 * 1024 || hello_len == 0 || hello_len > 65536 {
+    if pool_len == 0 || pool_len > 128 * 1024 * 1024 {
         exit(106);
     }
 
-    // 4. Open bundle
+    // 4. Open bundle and read single shared compressed pool
     let fd = open(bundle_path, 0, 0); // O_RDONLY = 0
     if fd < 0 {
         exit(107);
     }
 
-    // Read compressed platform
-    let mut comp_plat = [0u8; 64 * 1024];
-    if lseek(fd, plat_off, 0) < 0 {
+    let mut comp_pool = alloc::vec![0u8; pool_len];
+    if lseek(fd, pool_off, 0) < 0 {
         exit(108);
     }
     let mut read_total = 0;
-    while read_total < plat_len {
+    while read_total < pool_len {
         let n = read(
             fd,
-            comp_plat.as_mut_ptr().add(read_total),
-            plat_len - read_total,
+            comp_pool.as_mut_ptr().add(read_total),
+            pool_len - read_total,
         );
         if n <= 0 {
             exit(109);
         }
         read_total += n as usize;
     }
-
-    // Read compressed hello payload
-    let mut comp_hello = [0u8; 65536];
-    if lseek(fd, hello_off, 0) < 0 {
-        exit(110);
-    }
-    let mut read_total = 0;
-    while read_total < hello_len {
-        let n = read(
-            fd,
-            comp_hello.as_mut_ptr().add(read_total),
-            hello_len - read_total,
-        );
-        if n <= 0 {
-            exit(111);
-        }
-        read_total += n as usize;
-    }
     close(fd);
 
-    // 4. Decompress components
-    let mut dec_plat = [0u8; 64 * 1024];
-    let plat_decompressed_len =
-        match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
-            Ok(n) => n,
-            Err(_) => exit(112),
-        };
+    let pool = match crate::decompress::decompress_to_vec(&comp_pool) {
+        Ok(v) => v,
+        Err(_) => exit(112),
+    };
+    drop(comp_pool);
 
-    let mut dec_hello = [0u8; 65536];
-    let hello_decompressed_len =
-        match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
-            Ok(n) => n,
-            Err(_) => exit(113),
-        };
+    #[cfg(target_arch = "x86_64")]
+    const PLAT_NAME: &[u8] = b"platform-darwin-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const PLAT_NAME: &[u8] = b"platform-darwin-aarch64";
+    #[cfg(target_arch = "x86_64")]
+    const RUNTIME_NAME: &[u8] = b"runtime-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const RUNTIME_NAME: &[u8] = b"runtime-aarch64";
+    #[cfg(target_arch = "x86_64")]
+    const HELLO_NAME: &[u8] = b"hello-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const HELLO_NAME: &[u8] = b"hello-aarch64";
+    #[cfg(target_arch = "x86_64")]
+    const FILEIO_NAME: &[u8] = b"fileio-x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const FILEIO_NAME: &[u8] = b"fileio-aarch64";
+
+    let Some(plat_slice) = crate::pool::find_entry(&pool, PLAT_NAME) else {
+        exit(113);
+    };
+    let brain_slice = crate::pool::find_entry(&pool, b"brain.wasm");
+    let use_brain = brain_slice.is_some() && !is_fileio;
+    let payload_name = if is_fileio {
+        FILEIO_NAME
+    } else if use_brain {
+        RUNTIME_NAME
+    } else {
+        HELLO_NAME
+    };
+    let Some(payload_slice) = crate::pool::find_entry(&pool, payload_name) else {
+        exit(113);
+    };
+
+    let mut brain_argv = alloc::vec::Vec::new();
+    let (guest_argv, guest_argc) = if use_brain {
+        brain_argv.push(bundle_path);
+        let mut idx = 0;
+        while idx < raw_guest_argc {
+            brain_argv.push(*raw_guest_argv.add(idx));
+            idx += 1;
+        }
+        (brain_argv.as_ptr(), brain_argv.len())
+    } else {
+        (raw_guest_argv, raw_guest_argc)
+    };
 
     // 5. Allocate executable memory for platform (including 128 KiB prefix)
-    let total_plat_size = PREFIX_ABI_OFFSET + plat_decompressed_len;
+    let total_plat_size = PREFIX_ABI_OFFSET + plat_slice.len();
     let plat_alloc = alloc_executable(total_plat_size);
     if plat_alloc.is_null() {
         exit(114);
     }
+
+    let (wasm_ptr, wasm_len) = match brain_slice {
+        Some(w) if use_brain => (w.as_ptr(), w.len()),
+        _ => (core::ptr::null(), 0),
+    };
 
     pthread_jit_write_protect_np(0);
     core::ptr::write(
@@ -284,20 +308,22 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
             free: Some(free_cb),
             flush_cache: Some(flush_cb),
             set_jit_write_protect: Some(jit_protect_cb),
-            hello_payload: dec_hello.as_ptr(),
-            hello_payload_size: hello_decompressed_len,
+            hello_payload: payload_slice.as_ptr(),
+            hello_payload_size: payload_slice.len(),
             argv: guest_argv,
             argc: guest_argc,
+            wasm_bytes: wasm_ptr,
+            wasm_len,
         },
     );
     let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;
     core::ptr::copy_nonoverlapping(
-        dec_plat.as_ptr(),
+        plat_slice.as_ptr(),
         plat_code as *mut u8,
-        plat_decompressed_len,
+        plat_slice.len(),
     );
     pthread_jit_write_protect_np(1);
-    sys_icache_invalidate(plat_code, plat_decompressed_len);
+    sys_icache_invalidate(plat_code, plat_slice.len());
 
     // 6. Invoke PAL at +0x00000
     let entry: PlatformEntry = core::mem::transmute(plat_code);

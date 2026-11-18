@@ -115,19 +115,23 @@ func TestAssembleVegetableBashHandoff(t *testing.T) {
 	}
 
 	assets := AssemblyAssets{
-		BrotLinuxX86_64:       writeAsset("brot-linux-x86_64"),
-		BrotLinuxAarch64:      writeAsset("brot-linux-aarch64"),
-		BrotAndroidAarch64:    writeAsset("brot-android-aarch64"),
-		BrotDarwinX86_64:      writeAsset("brot-darwin-x86_64"),
-		BrotDarwinAarch64:     writeAsset("brot-darwin-aarch64"),
-		PlatformLinuxX86_64:   writeAsset("platform-linux-x86_64"),
-		PlatformLinuxAarch64:  writeAsset("platform-linux-aarch64"),
-		PlatformDarwinX86_64:  writeAsset("platform-darwin-x86_64"),
-		PlatformDarwinAarch64: writeAsset("platform-darwin-aarch64"),
-		HelloX86_64:           writeAsset("hello-x86_64"),
-		HelloAarch64:          writeAsset("hello-aarch64"),
-		FileIoX86_64:          writeAsset("fileio-x86_64"),
-		FileIoAarch64:         writeAsset("fileio-aarch64"),
+		BrotLinuxX86_64:        writeAsset("brot-linux-x86_64"),
+		BrotLinuxAarch64:       writeAsset("brot-linux-aarch64"),
+		BrotAndroidAarch64:     writeAsset("brot-android-aarch64"),
+		BrotDarwinX86_64:       writeAsset("brot-darwin-x86_64"),
+		BrotDarwinAarch64:      writeAsset("brot-darwin-aarch64"),
+		PlatformWindowsX86_64:  writeAsset("platform-windows-x86_64"),
+		PlatformWindowsAarch64: writeAsset("platform-windows-aarch64"),
+		PlatformLinuxX86_64:    writeAsset("platform-linux-x86_64"),
+		PlatformLinuxAarch64:   writeAsset("platform-linux-aarch64"),
+		PlatformDarwinX86_64:   writeAsset("platform-darwin-x86_64"),
+		PlatformDarwinAarch64:  writeAsset("platform-darwin-aarch64"),
+		RuntimeX86_64:          writeAsset("runtime-x86_64"),
+		RuntimeAarch64:         writeAsset("runtime-aarch64"),
+		HelloX86_64:            writeAsset("hello-x86_64"),
+		HelloAarch64:           writeAsset("hello-aarch64"),
+		FileIoX86_64:           writeAsset("fileio-x86_64"),
+		FileIoAarch64:          writeAsset("fileio-aarch64"),
 	}
 
 	templatesDir := filepath.Join(workDir, "templates")

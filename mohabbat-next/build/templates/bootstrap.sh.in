@@ -27,15 +27,14 @@ case "$SYSTEM" in
 esac
 
 run() {
-    b_off="$1"; b_len="$2"; p_off="$3"; p_len="$4"; h_off="$5"; h_len="$6"; f_off="$7"; f_len="$8"
-    shift 8
+    b_off="$1"; b_len="$2"; pool_off="$3"; pool_len="$4"; mode="normal"
+    shift 4
 
     if [ "${1:-}" = "--file-io-test" ]; then
         [ "$#" -ge 2 ] || { echo "Missing file-I/O test directory." >&2; exit 2; }
         [ -d "$2" ] || { echo "File-I/O test directory does not exist: $2" >&2; exit 2; }
         cd -- "$2"
-        h_off="$f_off"
-        h_len="$f_len"
+        mode="fileio"
         shift 2
     fi
 
@@ -50,14 +49,15 @@ run() {
     tail -c "+$((b_off + 1))" "$ME" | head -c "$b_len" > "$tmp_exe"
     [ -s "$tmp_exe" ] || { echo "brot: failed to extract launcher into $tmp_exe from $ME" >&2; exit 3; }
     chmod 700 "$tmp_exe"
-    exec "$tmp_exe" "$ME" "$p_off" "$p_len" "$h_off" "$h_len" "$@"
+    exec "$tmp_exe" "$ME" "$pool_off" "$pool_len" "$mode" "$@"
 }
 
 case "$SYSTEM/$ARCH" in
-    linux/x86_64)    run {{.BrotLinuxX86_64Offset}} {{.BrotLinuxX86_64Length}} {{.PlatformLinuxX86_64Offset}} {{.PlatformLinuxX86_64Length}} {{.HelloX86_64Offset}} {{.HelloX86_64Length}} {{.FileIoX86_64Offset}} {{.FileIoX86_64Length}} "$@" ;;
-    linux/aarch64)   run {{.BrotLinuxAarch64Offset}} {{.BrotLinuxAarch64Length}} {{.PlatformLinuxAarch64Offset}} {{.PlatformLinuxAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} {{.FileIoAarch64Offset}} {{.FileIoAarch64Length}} "$@" ;;
-    android/aarch64) run {{.BrotAndroidAarch64Offset}} {{.BrotAndroidAarch64Length}} {{.PlatformAndroidAarch64Offset}} {{.PlatformAndroidAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} {{.FileIoAarch64Offset}} {{.FileIoAarch64Length}} "$@" ;;
-    darwin/x86_64)   run {{.BrotDarwinX86_64Offset}} {{.BrotDarwinX86_64Length}} {{.PlatformDarwinX86_64Offset}} {{.PlatformDarwinX86_64Length}} {{.HelloX86_64Offset}} {{.HelloX86_64Length}} {{.FileIoX86_64Offset}} {{.FileIoX86_64Length}} "$@" ;;
-    darwin/aarch64)  run {{.BrotDarwinAarch64Offset}} {{.BrotDarwinAarch64Length}} {{.PlatformDarwinAarch64Offset}} {{.PlatformDarwinAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} {{.FileIoAarch64Offset}} {{.FileIoAarch64Length}} "$@" ;;
+    linux/x86_64)    run {{.BrotLinuxX86_64Offset}} {{.BrotLinuxX86_64Length}} {{.PoolOffset}} {{.PoolLength}} "$@" ;;
+    linux/aarch64)   run {{.BrotLinuxAarch64Offset}} {{.BrotLinuxAarch64Length}} {{.PoolOffset}} {{.PoolLength}} "$@" ;;
+    android/aarch64) run {{.BrotAndroidAarch64Offset}} {{.BrotAndroidAarch64Length}} {{.PoolOffset}} {{.PoolLength}} "$@" ;;
+    darwin/x86_64)   run {{.BrotDarwinX86_64Offset}} {{.BrotDarwinX86_64Length}} {{.PoolOffset}} {{.PoolLength}} "$@" ;;
+    darwin/aarch64)  run {{.BrotDarwinAarch64Offset}} {{.BrotDarwinAarch64Length}} {{.PoolOffset}} {{.PoolLength}} "$@" ;;
     *) echo "Unsupported target: $SYSTEM/$ARCH" >&2; exit 1 ;;
 esac
+exit 1

@@ -57,19 +57,87 @@ func validatePE(data []byte) (int, error) {
 }
 
 type AssemblyAssets struct {
-	BrotLinuxX86_64       string
-	BrotLinuxAarch64      string
-	BrotAndroidAarch64    string
-	BrotDarwinX86_64      string
-	BrotDarwinAarch64     string
-	PlatformLinuxX86_64   string
-	PlatformLinuxAarch64  string
-	PlatformDarwinX86_64  string
-	PlatformDarwinAarch64 string
-	HelloX86_64           string
-	HelloAarch64          string
-	FileIoX86_64          string
-	FileIoAarch64         string
+	BrotLinuxX86_64        string
+	BrotLinuxAarch64       string
+	BrotAndroidAarch64     string
+	BrotDarwinX86_64       string
+	BrotDarwinAarch64      string
+	PlatformWindowsX86_64  string
+	PlatformWindowsAarch64 string
+	PlatformLinuxX86_64    string
+	PlatformLinuxAarch64   string
+	PlatformDarwinX86_64   string
+	PlatformDarwinAarch64  string
+	RuntimeX86_64          string
+	RuntimeAarch64         string
+	HelloX86_64            string
+	HelloAarch64           string
+	FileIoX86_64           string
+	FileIoAarch64          string
+	BrainWasm              string
+}
+
+func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
+	type poolItem struct {
+		name string
+		path string
+	}
+	items := []poolItem{
+		{name: "platform-windows-x86_64", path: assets.PlatformWindowsX86_64},
+		{name: "platform-windows-aarch64", path: assets.PlatformWindowsAarch64},
+		{name: "platform-linux-x86_64", path: assets.PlatformLinuxX86_64},
+		{name: "platform-linux-aarch64", path: assets.PlatformLinuxAarch64},
+		{name: "platform-darwin-x86_64", path: assets.PlatformDarwinX86_64},
+		{name: "platform-darwin-aarch64", path: assets.PlatformDarwinAarch64},
+		{name: "runtime-x86_64", path: assets.RuntimeX86_64},
+		{name: "runtime-aarch64", path: assets.RuntimeAarch64},
+		{name: "hello-x86_64", path: assets.HelloX86_64},
+		{name: "hello-aarch64", path: assets.HelloAarch64},
+		{name: "fileio-x86_64", path: assets.FileIoX86_64},
+		{name: "fileio-aarch64", path: assets.FileIoAarch64},
+	}
+	if assets.BrainWasm != "" {
+		items = append(items, poolItem{name: "brain.wasm", path: assets.BrainWasm})
+	}
+
+	const headerSize = 16
+	const tocEntrySize = 40
+	tocSize := len(items) * tocEntrySize
+	payloadOffset := headerSize + tocSize
+
+	rawPayloads := make([][]byte, len(items))
+	totalSize := payloadOffset
+	for i, item := range items {
+		if len(item.name) > 32 {
+			return nil, fmt.Errorf("pool entry name exceeds 32 bytes: %s", item.name)
+		}
+		data, err := os.ReadFile(item.path)
+		if err != nil {
+			return nil, fmt.Errorf("read pool asset %s (%s): %w", item.name, item.path, err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("pool asset is empty: %s (%s)", item.name, item.path)
+		}
+		rawPayloads[i] = data
+		totalSize += len(data)
+	}
+
+	poolRaw := make([]byte, totalSize)
+	copy(poolRaw[0:8], "MHBTPOOL")
+	binary.LittleEndian.PutUint32(poolRaw[8:12], 1)
+	binary.LittleEndian.PutUint32(poolRaw[12:16], uint32(len(items)))
+
+	cur := payloadOffset
+	for i, item := range items {
+		tocOff := headerSize + i*tocEntrySize
+		copy(poolRaw[tocOff:tocOff+32], item.name)
+		binary.LittleEndian.PutUint32(poolRaw[tocOff+32:tocOff+36], uint32(cur))
+		binary.LittleEndian.PutUint32(poolRaw[tocOff+36:tocOff+40], uint32(len(rawPayloads[i])))
+		copy(poolRaw[cur:cur+len(rawPayloads[i])], rawPayloads[i])
+		cur += len(rawPayloads[i])
+	}
+
+	return compressZstandard(poolRaw)
 }
 
 func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDir string, outputExe string) error {
@@ -155,44 +223,14 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		return err
 	}
 
-	// 2. Compressed platform modules
-	platLinuxX86_64, err := addAsset(assets.PlatformLinuxX86_64, true)
+	// 2. Single shared compressed pool blob (all PALs, runtimes, hello/fileio, and optional brain.wasm)
+	poolCompressed, err := buildSharedPool(assets)
 	if err != nil {
 		return err
 	}
-	platLinuxAarch64, err := addAsset(assets.PlatformLinuxAarch64, true)
-	if err != nil {
-		return err
-	}
-	// Android reuses Linux AArch64 platform binary
-	platAndroidAarch64, err := addAsset(assets.PlatformLinuxAarch64, true)
-	if err != nil {
-		return err
-	}
-	platDarwinX86_64, err := addAsset(assets.PlatformDarwinX86_64, true)
-	if err != nil {
-		return err
-	}
-	platDarwinAarch64, err := addAsset(assets.PlatformDarwinAarch64, true)
-	if err != nil {
-		return err
-	}
-
-	// 3. Compressed hello runtimes
-	helloX86_64, err := addAsset(assets.HelloX86_64, true)
-	if err != nil {
-		return err
-	}
-	helloAarch64, err := addAsset(assets.HelloAarch64, true)
-	if err != nil {
-		return err
-	}
-	fileIoX86_64, err := addAsset(assets.FileIoX86_64, true)
-	if err != nil {
-		return err
-	}
-	fileIoAarch64, err := addAsset(assets.FileIoAarch64, true)
-	if err != nil {
+	poolOffset := int64(bundle.Len())
+	poolLength := int64(len(poolCompressed))
+	if _, err := bundle.Write(poolCompressed); err != nil {
 		return err
 	}
 
@@ -200,65 +238,33 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 
 	// 4. Render bootstrap.sh.in
 	type BootstrapData struct {
-		BrotLinuxX86_64Offset        int64
-		BrotLinuxX86_64Length        int64
-		PlatformLinuxX86_64Offset    int64
-		PlatformLinuxX86_64Length    int64
-		HelloX86_64Offset            int64
-		HelloX86_64Length            int64
-		FileIoX86_64Offset           int64
-		FileIoX86_64Length           int64
-		BrotLinuxAarch64Offset       int64
-		BrotLinuxAarch64Length       int64
-		PlatformLinuxAarch64Offset   int64
-		PlatformLinuxAarch64Length   int64
-		HelloAarch64Offset           int64
-		HelloAarch64Length           int64
-		FileIoAarch64Offset          int64
-		FileIoAarch64Length          int64
-		BrotAndroidAarch64Offset     int64
-		BrotAndroidAarch64Length     int64
-		PlatformAndroidAarch64Offset int64
-		PlatformAndroidAarch64Length int64
-		BrotDarwinX86_64Offset       int64
-		BrotDarwinX86_64Length       int64
-		PlatformDarwinX86_64Offset   int64
-		PlatformDarwinX86_64Length   int64
-		BrotDarwinAarch64Offset      int64
-		BrotDarwinAarch64Length      int64
-		PlatformDarwinAarch64Offset  int64
-		PlatformDarwinAarch64Length  int64
+		BrotLinuxX86_64Offset    int64
+		BrotLinuxX86_64Length    int64
+		BrotLinuxAarch64Offset   int64
+		BrotLinuxAarch64Length   int64
+		BrotAndroidAarch64Offset int64
+		BrotAndroidAarch64Length int64
+		BrotDarwinX86_64Offset   int64
+		BrotDarwinX86_64Length   int64
+		BrotDarwinAarch64Offset  int64
+		BrotDarwinAarch64Length  int64
+		PoolOffset               int64
+		PoolLength               int64
 	}
 
 	bData := BootstrapData{
-		BrotLinuxX86_64Offset:        brotLinuxX86_64.Offset,
-		BrotLinuxX86_64Length:        brotLinuxX86_64.Length,
-		PlatformLinuxX86_64Offset:    platLinuxX86_64.Offset,
-		PlatformLinuxX86_64Length:    platLinuxX86_64.Length,
-		HelloX86_64Offset:            helloX86_64.Offset,
-		HelloX86_64Length:            helloX86_64.Length,
-		FileIoX86_64Offset:           fileIoX86_64.Offset,
-		FileIoX86_64Length:           fileIoX86_64.Length,
-		BrotLinuxAarch64Offset:       brotLinuxAarch64.Offset,
-		BrotLinuxAarch64Length:       brotLinuxAarch64.Length,
-		PlatformLinuxAarch64Offset:   platLinuxAarch64.Offset,
-		PlatformLinuxAarch64Length:   platLinuxAarch64.Length,
-		HelloAarch64Offset:           helloAarch64.Offset,
-		HelloAarch64Length:           helloAarch64.Length,
-		FileIoAarch64Offset:          fileIoAarch64.Offset,
-		FileIoAarch64Length:          fileIoAarch64.Length,
-		BrotAndroidAarch64Offset:     brotAndroidAarch64.Offset,
-		BrotAndroidAarch64Length:     brotAndroidAarch64.Length,
-		PlatformAndroidAarch64Offset: platAndroidAarch64.Offset,
-		PlatformAndroidAarch64Length: platAndroidAarch64.Length,
-		BrotDarwinX86_64Offset:       brotDarwinX86_64.Offset,
-		BrotDarwinX86_64Length:       brotDarwinX86_64.Length,
-		PlatformDarwinX86_64Offset:   platDarwinX86_64.Offset,
-		PlatformDarwinX86_64Length:   platDarwinX86_64.Length,
-		BrotDarwinAarch64Offset:      brotDarwinAarch64.Offset,
-		BrotDarwinAarch64Length:      brotDarwinAarch64.Length,
-		PlatformDarwinAarch64Offset:  platDarwinAarch64.Offset,
-		PlatformDarwinAarch64Length:  platDarwinAarch64.Length,
+		BrotLinuxX86_64Offset:    brotLinuxX86_64.Offset,
+		BrotLinuxX86_64Length:    brotLinuxX86_64.Length,
+		BrotLinuxAarch64Offset:   brotLinuxAarch64.Offset,
+		BrotLinuxAarch64Length:   brotLinuxAarch64.Length,
+		BrotAndroidAarch64Offset: brotAndroidAarch64.Offset,
+		BrotAndroidAarch64Length: brotAndroidAarch64.Length,
+		BrotDarwinX86_64Offset:   brotDarwinX86_64.Offset,
+		BrotDarwinX86_64Length:   brotDarwinX86_64.Length,
+		BrotDarwinAarch64Offset:  brotDarwinAarch64.Offset,
+		BrotDarwinAarch64Length:  brotDarwinAarch64.Length,
+		PoolOffset:               poolOffset,
+		PoolLength:               poolLength,
 	}
 
 	bootTmplPath := filepath.Join(templatesDir, "bootstrap.sh.in")
@@ -284,6 +290,15 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		return fmt.Errorf("bootstrap script contains forbidden CR (0x0D) characters")
 	}
 	if _, err := bundle.Write(normBoot); err != nil {
+		return err
+	}
+
+	// Append 24-byte EOF trailer so Windows locates the same shared pool blob directly.
+	var trailer [24]byte
+	binary.LittleEndian.PutUint64(trailer[0:8], uint64(poolOffset))
+	binary.LittleEndian.PutUint64(trailer[8:16], uint64(poolLength))
+	copy(trailer[16:24], "MHBTTAIL")
+	if _, err := bundle.Write(trailer[:]); err != nil {
 		return err
 	}
 

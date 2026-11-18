@@ -419,77 +419,9 @@ func main() {
 		}
 	}
 
-	// Step 3: Compress Windows components for CLR embedding (in parallel with max zstd)
-	fmt.Println("🍆  [3/5] Compressing Windows platform, hello, and file-I/O payloads (max Zstandard)...")
-	type winCompDef struct {
-		SrcBin  string
-		OutZst  string
-		ResName string
-	}
-	winComps := []winCompDef{
-		{SrcBin: builtBins["hello-x86_64"], OutZst: filepath.Join(componentsDir, "hello-x86_64.zst"), ResName: "MohabbatNext.Hello.x86_64.zst"},
-		{SrcBin: builtBins["hello-aarch64"], OutZst: filepath.Join(componentsDir, "hello-aarch64.zst"), ResName: "MohabbatNext.Hello.aarch64.zst"},
-		{SrcBin: builtBins["hello-fileio-x86_64"], OutZst: filepath.Join(componentsDir, "fileio-x86_64.zst"), ResName: "MohabbatNext.FileIo.x86_64.zst"},
-		{SrcBin: builtBins["hello-fileio-aarch64"], OutZst: filepath.Join(componentsDir, "fileio-aarch64.zst"), ResName: "MohabbatNext.FileIo.aarch64.zst"},
-		{SrcBin: builtBins["platform-windows-x86_64"], OutZst: filepath.Join(componentsDir, "platform-windows-x86_64.zst"), ResName: "MohabbatNext.Platform.Windows.x86_64.zst"},
-		{SrcBin: builtBins["platform-windows-aarch64"], OutZst: filepath.Join(componentsDir, "platform-windows-aarch64.zst"), ResName: "MohabbatNext.Platform.Windows.aarch64.zst"},
-		{SrcBin: builtBins["runtime-x86_64"], OutZst: filepath.Join(componentsDir, "runtime-x86_64.zst"), ResName: "MohabbatNext.Runtime.x86_64.zst"},
-		{SrcBin: builtBins["runtime-aarch64"], OutZst: filepath.Join(componentsDir, "runtime-aarch64.zst"), ResName: "MohabbatNext.Runtime.aarch64.zst"},
-	}
-	if brainWasmPath != "" {
-		winComps = append(winComps, winCompDef{
-			SrcBin:  brainWasmPath,
-			OutZst:  filepath.Join(componentsDir, targetName+".wasm.zst"),
-			ResName: "MohabbatNext.Brain.wasm.zst",
-		})
-	}
-
-	var (
-		compWg       sync.WaitGroup
-		compMu       sync.Mutex
-		winResources = make([]WindowsComponentResource, len(winComps))
-	)
-
-	for idx, c := range winComps {
-		compWg.Add(1)
-		go func(i int, c winCompDef) {
-			defer compWg.Done()
-			raw, err := os.ReadFile(c.SrcBin)
-			if err != nil {
-				compMu.Lock()
-				errs = append(errs, fmt.Errorf("read %s: %w", c.SrcBin, err))
-				compMu.Unlock()
-				return
-			}
-			compressed, err := compressZstandard(raw)
-			if err != nil {
-				compMu.Lock()
-				errs = append(errs, fmt.Errorf("compress %s: %w", c.SrcBin, err))
-				compMu.Unlock()
-				return
-			}
-			if err := os.WriteFile(c.OutZst, compressed, 0o644); err != nil {
-				compMu.Lock()
-				errs = append(errs, fmt.Errorf("write %s: %w", c.OutZst, err))
-				compMu.Unlock()
-				return
-			}
-			compMu.Lock()
-			winResources[i] = WindowsComponentResource{
-				FilePath:     c.OutZst,
-				ResourceName: c.ResName,
-			}
-			compMu.Unlock()
-		}(idx, c)
-	}
-
-	compWg.Wait()
-	if len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", e)
-		}
-		os.Exit(1)
-	}
+	// Step 3: Windows CLR host embeds only ZstdSharp; all native/WASM components live in the shared compressed pool.
+	fmt.Println("🍆  [3/5] Preparing Windows CLR Host (shared compressed pool will be appended)...")
+	var winResources []WindowsComponentResource
 
 	// Step 4: Build Windows AnyCPU CLR Host
 	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
@@ -532,19 +464,24 @@ func main() {
 	}
 
 	assemblyAssets := AssemblyAssets{
-		BrotLinuxX86_64:       brotPaths["brot-x86_64-unknown-linux-gnu"],
-		BrotLinuxAarch64:      brotPaths["brot-aarch64-unknown-linux-gnu"],
-		BrotAndroidAarch64:    brotPaths["brot-aarch64-linux-android"],
-		BrotDarwinX86_64:      brotPaths["brot-x86_64-apple-darwin"],
-		BrotDarwinAarch64:     brotPaths["brot-aarch64-apple-darwin"],
-		PlatformLinuxX86_64:   builtBins["platform-linux-x86_64"],
-		PlatformLinuxAarch64:  builtBins["platform-linux-aarch64"],
-		PlatformDarwinX86_64:  builtBins["platform-darwin-x86_64"],
-		PlatformDarwinAarch64: builtBins["platform-darwin-aarch64"],
-		HelloX86_64:           builtBins["hello-x86_64"],
-		HelloAarch64:          builtBins["hello-aarch64"],
-		FileIoX86_64:          builtBins["hello-fileio-x86_64"],
-		FileIoAarch64:         builtBins["hello-fileio-aarch64"],
+		BrotLinuxX86_64:        brotPaths["brot-x86_64-unknown-linux-gnu"],
+		BrotLinuxAarch64:       brotPaths["brot-aarch64-unknown-linux-gnu"],
+		BrotAndroidAarch64:     brotPaths["brot-aarch64-linux-android"],
+		BrotDarwinX86_64:       brotPaths["brot-x86_64-apple-darwin"],
+		BrotDarwinAarch64:      brotPaths["brot-aarch64-apple-darwin"],
+		PlatformWindowsX86_64:  builtBins["platform-windows-x86_64"],
+		PlatformWindowsAarch64: builtBins["platform-windows-aarch64"],
+		PlatformLinuxX86_64:    builtBins["platform-linux-x86_64"],
+		PlatformLinuxAarch64:   builtBins["platform-linux-aarch64"],
+		PlatformDarwinX86_64:   builtBins["platform-darwin-x86_64"],
+		PlatformDarwinAarch64:  builtBins["platform-darwin-aarch64"],
+		RuntimeX86_64:          builtBins["runtime-x86_64"],
+		RuntimeAarch64:         builtBins["runtime-aarch64"],
+		HelloX86_64:            builtBins["hello-x86_64"],
+		HelloAarch64:           builtBins["hello-aarch64"],
+		FileIoX86_64:           builtBins["hello-fileio-x86_64"],
+		FileIoAarch64:          builtBins["hello-fileio-aarch64"],
+		BrainWasm:              brainWasmPath,
 	}
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {

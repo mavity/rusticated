@@ -10,14 +10,14 @@ The source tree is organized by architectural role:
 
 ```text
 pal/
-  abi/guest.rs            # payload/runtime-to-PAL contract
-  windows/                # Windows PAL
-  unix/                   # Linux and macOS PAL
+  abi/                    # payload/runtime-to-PAL contract
+  windows/                # Windows PAL (Zig freestanding)
+  unix/                   # Linux and macOS PAL (Zig freestanding)
 brot/
-  unix/                   # native Brot launchers
-  windows-host/           # CLR host and component packer
-payload/                  # OS-independent raw-entry payloads
-runtime/                  # movable Cranelift runtime
+  unix/                   # native Zig Brot launchers (std.compress.zstd)
+  windows-host/           # AnyCPU CLR host reading shared MHBTPOOL via MHBTTAIL
+payload/                  # OS-independent raw-entry payloads (Zig freestanding)
+runtime/                  # movable zwasm runtime slice (Zig freestanding, -O ReleaseFast)
 build/                    # Go build and assembly orchestration
 test/                     # unit and cross-platform acceptance tests
 ```
@@ -25,9 +25,9 @@ test/                     # unit and cross-platform acceptance tests
 The test runner writes its assembled Windows acceptance artifact to
 `brot/windows-host/out/MohabbatNext.exe`; the default builder output is
 `release/dist/MohabbatNext.exe`. On Windows, the AnyCPU CLR host identifies
-the native processor architecture, decompresses the matching components from
-embedded Zstandard resources, and transfers control to the platform
-abstraction.
+the native processor architecture, decompresses the shared `MHBTPOOL` blob
+located via the 24-byte `MHBTTAIL` EOF trailer, and transfers control to the
+platform abstraction.
 
 The Go builder compiles separate freestanding PAL and payload binaries for
 x86-64 and AArch64. The PAL receives a narrow ABI from the host, resolves
@@ -83,8 +83,8 @@ release/dist/MohabbatNext.exe
 
 Use `go run ./mohabbat-next/build -o <path>` to select another output, or
 `go run ./mohabbat-next/build -windows-host-only` to build only the Windows
-host. Building requires nightly Rust with `rust-src`, Cargo, LLVM linker and
-inspection tools, .NET, and the .NET Framework compiler.
+host. Building requires Zig `0.17.1`, Go, LLVM linker and inspection tools
+(`ld.lld`, `llvm-objcopy`, `llvm-readobj`), .NET, and the .NET Framework compiler.
 
 The EXE requires a 64-bit Windows CLR. Its application manifest advertises
 AMD64 and ARM64 support, and the CLR selects the matching embedded binaries.

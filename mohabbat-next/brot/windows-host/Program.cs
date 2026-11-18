@@ -85,7 +85,7 @@ internal static class Program
                 args.Length == 3 ? args[2] : "load-add-store");
         }
         bool fileIoTest = args.Length >= 2 && args[0] == "--file-io-test";
-        bool hasBrain = typeof(Program).Assembly.GetManifestResourceInfo("MohabbatNext.Brain.wasm.zst") != null;
+        bool hasBrain = TryReadComponent("brain.wasm") != null;
         if (args.Length != 0 && !fileIoTest && !hasBrain)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
@@ -141,18 +141,13 @@ internal static class Program
             argumentVector = AllocateArgumentVector(guestArgs, out argumentCount);
 
             string architecture = GetArchitecture();
-            byte[] platform = ReadComponent(
-                string.Format(
-                    "MohabbatNext.Platform.Windows.{0}.zst",
-                    architecture));
+            byte[] platform = ReadComponent("platform-windows-" + architecture);
             bool useBrain = hasBrain && !fileIoTest;
             byte[] hello = ReadComponent(
-                string.Format(
-                    fileIoTest
-                        ? "MohabbatNext.FileIo.{0}.zst"
-                        : (useBrain ? "MohabbatNext.Runtime.{0}.zst" : "MohabbatNext.Hello.{0}.zst"),
-                    architecture));
-            byte[] wasm = useBrain ? ReadComponent("MohabbatNext.Brain.wasm.zst") : null;
+                fileIoTest
+                    ? "fileio-" + architecture
+                    : (useBrain ? "runtime-" + architecture : "hello-" + architecture));
+            byte[] wasm = useBrain ? TryReadComponent("brain.wasm") : null;
 
             platformPin = GCHandle.Alloc(platform, GCHandleType.Pinned);
             helloPin = GCHandle.Alloc(hello, GCHandleType.Pinned);
@@ -256,12 +251,12 @@ internal static class Program
         string[] architectures = { "x86_64", "aarch64" };
         foreach (string architecture in architectures)
         {
-            ReadComponent(
-                "MohabbatNext.Platform.Windows." + architecture + ".zst");
-            ReadComponent("MohabbatNext.Hello." + architecture + ".zst");
-            ReadComponent("MohabbatNext.FileIo." + architecture + ".zst");
+            ReadComponent("platform-windows-" + architecture);
+            ReadComponent("hello-" + architecture);
+            ReadComponent("fileio-" + architecture);
+            ReadComponent("runtime-" + architecture);
         }
-        Console.WriteLine("Verified all six compressed components.");
+        Console.WriteLine("Verified all shared compressed pool components.");
         return 0;
     }
 
@@ -881,30 +876,114 @@ internal static class Program
         }
     }
 
+    private static byte[] s_sharedPool;
+
+    private static byte[] LoadSharedPool()
+    {
+        if (s_sharedPool != null)
+        {
+            return s_sharedPool;
+        }
+        string exePath = typeof(Program).Assembly.Location;
+        if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+        {
+            throw new InvalidOperationException("Cannot locate executable to read shared compressed pool.");
+        }
+        using (var fs = new FileStream(exePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (fs.Length < 24)
+            {
+                throw new InvalidOperationException("Executable is too small to contain shared pool trailer.");
+            }
+            fs.Seek(-24, SeekOrigin.End);
+            byte[] trailer = new byte[24];
+            int trRead = 0;
+            while (trRead < 24)
+            {
+                int n = fs.Read(trailer, trRead, 24 - trRead);
+                if (n <= 0) break;
+                trRead += n;
+            }
+            if (trRead != 24 || Encoding.ASCII.GetString(trailer, 16, 8) != "MHBTTAIL")
+            {
+                throw new InvalidOperationException("Shared pool trailer (MHBTTAIL) not found.");
+            }
+            long poolOffset = BitConverter.ToInt64(trailer, 0);
+            long poolLength = BitConverter.ToInt64(trailer, 8);
+            if (poolOffset <= 0 || poolLength <= 0 || poolLength > MaximumComponentSize || poolOffset + poolLength > fs.Length - 24)
+            {
+                throw new InvalidOperationException("Shared pool range in trailer is invalid.");
+            }
+            fs.Seek(poolOffset, SeekOrigin.Begin);
+            byte[] compressed = new byte[(int)poolLength];
+            int total = 0;
+            while (total < compressed.Length)
+            {
+                int n = fs.Read(compressed, total, compressed.Length - total);
+                if (n <= 0)
+                {
+                    throw new InvalidOperationException("Unexpected EOF reading shared compressed pool.");
+                }
+                total += n;
+            }
+            byte[] pool = DecompressZstandard(compressed);
+            if (pool.Length < 16 || Encoding.ASCII.GetString(pool, 0, 8) != "MHBTPOOL")
+            {
+                throw new InvalidOperationException("Decompressed shared pool has invalid magic.");
+            }
+            s_sharedPool = pool;
+            return s_sharedPool;
+        }
+    }
+
+    private static byte[] TryReadComponent(string name)
+    {
+        byte[] pool = LoadSharedPool();
+        uint version = BitConverter.ToUInt32(pool, 8);
+        uint count = BitConverter.ToUInt32(pool, 12);
+        if (version != 1 || 16 + (long)count * 40 > pool.Length)
+        {
+            throw new InvalidOperationException("Shared pool header is invalid.");
+        }
+        for (uint i = 0; i < count; i++)
+        {
+            int tocOff = 16 + (int)i * 40;
+            int nameLen = 0;
+            while (nameLen < 32 && pool[tocOff + nameLen] != 0)
+            {
+                nameLen++;
+            }
+            string entryName = Encoding.UTF8.GetString(pool, tocOff, nameLen);
+            if (entryName == name)
+            {
+                int off = (int)BitConverter.ToUInt32(pool, tocOff + 32);
+                int len = (int)BitConverter.ToUInt32(pool, tocOff + 36);
+                if (len <= 0 || off < 0 || (long)off + len > pool.Length)
+                {
+                    throw new InvalidOperationException("Shared pool entry has invalid bounds: " + name);
+                }
+                byte[] copy = new byte[len];
+                Buffer.BlockCopy(pool, off, copy, 0, len);
+                return copy;
+            }
+        }
+        return null;
+    }
+
     private static byte[] ReadComponent(string resourceName)
     {
-        Stream resource =
-            typeof(Program).Assembly.GetManifestResourceStream(resourceName);
-        if (resource == null)
+        byte[] component = TryReadComponent(resourceName);
+        if (component == null)
         {
             throw new InvalidOperationException(
-                "Embedded component is missing: " + resourceName);
+                "Shared pool component is missing: " + resourceName);
         }
-
-        using (resource)
-        using (var buffer = new MemoryStream())
+        if (component.Length == 0 || component.Length > MaximumComponentSize)
         {
-            resource.CopyTo(buffer);
-            byte[] component = DecompressZstandard(buffer.ToArray());
-            if (component.Length == 0 ||
-                component.Length > MaximumComponentSize)
-            {
-                throw new InvalidOperationException(
-                    "Embedded component has an invalid size: " +
-                    resourceName);
-            }
-            return component;
+            throw new InvalidOperationException(
+                "Shared pool component has an invalid size: " + resourceName);
         }
+        return component;
     }
 
     private static byte[] DecompressZstandard(byte[] compressed)

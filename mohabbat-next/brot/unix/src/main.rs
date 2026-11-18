@@ -6,6 +6,7 @@ extern crate alloc;
 #[cfg(not(test))]
 mod allocator;
 mod decompress;
+mod pool;
 
 #[cfg(target_os = "linux")]
 mod linux;

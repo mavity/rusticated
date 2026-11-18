@@ -1,3 +1,4 @@
 /.build/
 /target/
 /brot/*/out/
+/brot/*/target/

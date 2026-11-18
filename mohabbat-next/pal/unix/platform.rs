@@ -136,6 +136,8 @@ pub struct UnixPlatformHost {
     hello_payload_size: usize,
     argv: *const *const u8,
     argc: usize,
+    wasm_bytes: *const u8,
+    wasm_len: usize,
 }
 
 #[cfg(not(feature = "darwin"))]
@@ -2722,6 +2724,8 @@ unsafe fn run_linux() -> i32 {
 
     let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
     populate_all_abi_slots(&mut abi_table, process_exit);
+    abi_table.wasm_bytes = host.wasm_bytes;
+    abi_table.wasm_len = host.wasm_len;
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi_table);
 
     unix_abi::flush_icache_impl(payload_code.cast(), host.hello_payload_size);
@@ -2996,6 +3000,8 @@ unsafe fn run_darwin_or_host() -> i32 {
     let process_exit = exit;
     let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
     populate_all_abi_slots(&mut abi_table, process_exit);
+    abi_table.wasm_bytes = host.wasm_bytes;
+    abi_table.wasm_len = host.wasm_len;
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi_table);
     #[cfg(feature = "darwin")]
     set_jit_write_protect(1);
