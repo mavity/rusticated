@@ -13,7 +13,9 @@
 use crate::abi::Overlapped;
 use crate::abi::imports;
 use crate::boxed::Box;
-use crate::cell::{OnceCell, RefCell, UnsafeCell};
+#[cfg(not(test))]
+use crate::cell::OnceCell;
+use crate::cell::{RefCell, UnsafeCell};
 use crate::future::Future;
 use crate::pin::Pin;
 use crate::rc::Rc;
@@ -32,6 +34,7 @@ struct OverlappedStorage {
     read_offset: u64,
 }
 
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
     // SAFETY: `dest`/`len` come from getrandom which validates the slice is
@@ -130,14 +133,17 @@ struct MainFutureStorage(UnsafeCell<Option<RefCell<Option<MainFuture>>>>);
 
 unsafe impl Sync for MainFutureStorage {}
 
+#[cfg(not(test))]
 #[repr(align(8))]
 struct InitializedStorage(UnsafeCell<OnceCell<()>>);
 
+#[cfg(not(test))]
 unsafe impl Sync for InitializedStorage {}
 
 static COMPLETION_REGISTRY_STORAGE: CompletionRegistryStorage =
     CompletionRegistryStorage(UnsafeCell::new(None));
 static MAIN_FUTURE_STORAGE: MainFutureStorage = MainFutureStorage(UnsafeCell::new(None));
+#[cfg(not(test))]
 static INITIALIZED_STORAGE: InitializedStorage =
     InitializedStorage(UnsafeCell::new(OnceCell::new()));
 
@@ -161,6 +167,7 @@ fn main_future() -> &'static RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> 
     }
 }
 
+#[cfg(not(test))]
 fn initialized() -> &'static OnceCell<()> {
     unsafe { &*INITIALIZED_STORAGE.0.get() }
 }
@@ -388,6 +395,7 @@ impl Drop for OverlappedBufferFuture {
 
 // ─── Host entry points ───────────────────────────────────────────────────────
 
+#[cfg(not(test))]
 unsafe extern "Rust" {
     /// Guest-supplied initialiser. Called exactly once by the host on the
     /// first invocation of [`run()`]. The guest typically uses this to call
@@ -402,8 +410,9 @@ unsafe extern "Rust" {
 /// main future once. The call returns immediately; the host is responsible for
 /// scheduling subsequent ticks (typically: after any host-side completion is
 /// signalled into shared memory, or on a host timer).
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn run() -> i32 {
+pub extern "C" fn run() {
     if initialized().get().is_none() {
         // SAFETY: the guest is required to define `guest_init`; if it
         // does not, the program would have failed to link. Calling once
@@ -412,7 +421,7 @@ pub extern "C" fn run() -> i32 {
         let _ = initialized().set(());
     }
 
-    if tick() { 0 } else { -1 }
+    let _ = tick();
 }
 
 /// Drive one iteration of the runtime without re-running `guest_init`.

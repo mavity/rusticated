@@ -283,8 +283,9 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 				return
 			}
 
-			// Collect rlib paths by searching the deps directory.
+			// Collect rlib paths by searching the deps directory (newest per crate).
 			paths := map[string]string{}
+			modTimes := map[string]int64{}
 			depsDir := filepath.Join(targetDir, customName, "release", "deps")
 			entries, err := os.ReadDir(depsDir)
 			if err != nil {
@@ -310,8 +311,16 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 				} else {
 					continue
 				}
-				absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
-				paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
+				info, infoErr := entry.Info()
+				var mtime int64
+				if infoErr == nil {
+					mtime = info.ModTime().UnixNano()
+				}
+				if prev, ok := modTimes[crateName]; !ok || mtime >= prev {
+					absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
+					paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
+					modTimes[crateName] = mtime
+				}
 			}
 
 			if _, ok := paths["std"]; !ok {
@@ -326,12 +335,60 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 			}
 			absDepsDir = filepath.ToSlash(cleanWindowsPath(absDepsDir))
 
+			// Build rusticated-test (libtest) against the freshly built sysroot.
+			testManifest := filepath.Join(ws, "rusticated-test", "Cargo.toml")
+			if _, statErr := os.Stat(testManifest); statErr == nil {
+				var testFlags strings.Builder
+				testFlags.WriteString(rustflags)
+				for _, crate := range []string{"std", "core", "alloc", "compiler_builtins"} {
+					if p, ok := paths[crate]; ok {
+						fmt.Fprintf(&testFlags, " --extern %s=%s", crate, p)
+					}
+				}
+				fmt.Fprintf(&testFlags, " -L dependency=%s", absDepsDir)
+
+				testCmd := exec.Command("cargo",
+					"build", "--manifest-path", testManifest, "--release",
+					"--config", "unstable.json-target-spec=true",
+					"--target", targetArg)
+				testCmd.Env = upsertEnv(os.Environ(), "RUSTFLAGS", testFlags.String())
+				testCmd.Env = upsertEnv(testCmd.Env, "RUST_TARGET_PATH", rustTargetPath)
+				testCmd.Env = upsertEnv(testCmd.Env, "CARGO_TARGET_DIR", targetDir)
+				testCmd.Dir = ws
+				if err := runCmd(testCmd, "sysroot test build "+customName, verbose); err != nil {
+					errCh <- fmt.Errorf("sysroot test build failed for %s: %w", customName, err)
+					return
+				}
+
+				if testEntries, err := os.ReadDir(depsDir); err == nil {
+					var bestTestTime int64
+					for _, entry := range testEntries {
+						if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rlib") {
+							continue
+						}
+						filename := entry.Name()
+						if strings.HasPrefix(filename, "libtest-") || filename == "libtest.rlib" {
+							info, infoErr := entry.Info()
+							var mtime int64
+							if infoErr == nil {
+								mtime = info.ModTime().UnixNano()
+							}
+							if _, ok := paths["test"]; !ok || mtime >= bestTestTime {
+								absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
+								paths["test"] = filepath.ToSlash(cleanWindowsPath(absPath))
+								bestTestTime = mtime
+							}
+						}
+					}
+				}
+			}
+
 			configMu.Lock()
 			var entry strings.Builder
 			fmt.Fprintf(&entry, "[target.%s]\nrustflags = [\n", customName)
 			entry.WriteString("    \"-Zunstable-options\",\n")
 			entry.WriteString("    \"--cfg\", \"backtrace_in_libstd\",\n")
-			for _, crate := range []string{"std", "core", "alloc", "compiler_builtins"} {
+			for _, crate := range []string{"std", "core", "alloc", "compiler_builtins", "test"} {
 				if p, ok := paths[crate]; ok {
 					fmt.Fprintf(&entry, "    \"--extern\", \"%s=%s\",\n", crate, p)
 				}

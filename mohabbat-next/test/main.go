@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -19,23 +20,27 @@ func main() {
 	}
 
 	var (
-		projectFilter string
-		idleTimeout   time.Duration
-		suiteTimeout  time.Duration
-		skipBuild     bool
-		skipNative    bool
-		skipWasm      bool
-		skipRust      bool
-		skipZig       bool
+		projectFilter   string
+		idleTimeout     time.Duration
+		suiteTimeout    time.Duration
+		skipBuild       bool
+		skipNative      bool
+		skipX64Emulated bool
+		skipWasm        bool
+		skipRust        bool
+		skipZig         bool
+		skipNode        bool
 	)
 	flag.StringVar(&projectFilter, "p", "", "Comma-separated project/package filter")
 	flag.DurationVar(&idleTimeout, "stdio-idle-timeout", 3*time.Minute, "Fail a runner after this long without output")
 	flag.DurationVar(&suiteTimeout, "suite-timeout", 30*time.Minute, "Maximum duration of one test suite")
 	flag.BoolVar(&skipBuild, "skip-build", false, "Reuse an existing Mohabbat-Next test host")
 	flag.BoolVar(&skipNative, "skip-native", false, "Skip native Go tests")
+	flag.BoolVar(&skipX64Emulated, "skip-x64-emulated", false, "Skip x64-emulated Windows amd64 Go tests")
 	flag.BoolVar(&skipWasm, "skip-wasm", false, "Skip Rusticated WASM tests")
 	flag.BoolVar(&skipRust, "skip-rust", false, "Skip Rust WASM tests")
 	flag.BoolVar(&skipZig, "skip-zig", false, "Skip Zig tests")
+	flag.BoolVar(&skipNode, "skip-node", false, "Skip Node native tests")
 	flag.Parse()
 
 	root, err := findWorkspaceRoot()
@@ -51,11 +56,14 @@ func main() {
 	}
 	fmt.Printf("🧪 Mohabbat-Next test run: %s\n", run.logDir)
 
-	if !skipBuild && (!skipWasm || !skipRust) {
+	if !skipBuild && runtime.GOOS == "windows" && (!skipWasm || !skipRust) {
 		run.buildHost()
 	}
 	if !skipNative {
 		run.runNativeGo()
+	}
+	if !skipX64Emulated {
+		run.runX64EmulatedGo()
 	}
 	if !skipWasm {
 		run.runWasmGo()
@@ -65,6 +73,9 @@ func main() {
 	}
 	if !skipZig {
 		run.runZig()
+	}
+	if !skipNode {
+		run.runNode()
 	}
 
 	if err := run.finish(); err != nil {

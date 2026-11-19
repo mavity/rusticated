@@ -1,3 +1,4 @@
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
     if y == 0.0 {
@@ -8,6 +9,7 @@ pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
     x - (int_part as f64) * y
 }
 
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmodf(x: f32, y: f32) -> f32 {
     if y == 0.0 {

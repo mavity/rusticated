@@ -12,6 +12,8 @@ import (
 	"testing"
 	"text/template"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestZstandardRoundTrip(t *testing.T) {
@@ -218,5 +220,140 @@ func TestAssembleVegetableBashHandoff(t *testing.T) {
 	}
 	if !bytes.Contains(output, []byte("synthetic-bootstrap-ok\n")) {
 		t.Fatalf("synthetic bootstrap output mismatch: %q", output)
+	}
+}
+
+func TestBuildRunnerSharedPoolWithoutBrainWasm(t *testing.T) {
+	workDir := t.TempDir()
+	writeAsset := func(name string) string {
+		t.Helper()
+		p := filepath.Join(workDir, name)
+		if err := os.WriteFile(p, []byte("payload-"+name), 0o644); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+		return p
+	}
+
+	assets := AssemblyAssets{
+		PlatformWindowsX86_64:  writeAsset("platform-windows-x86_64"),
+		PlatformWindowsAarch64: writeAsset("platform-windows-aarch64"),
+		RuntimeX86_64:          writeAsset("runtime-x86_64"),
+		RuntimeAarch64:         writeAsset("runtime-aarch64"),
+	}
+
+	compressed, err := buildRunnerSharedPool(assets)
+	if err != nil {
+		t.Fatalf("buildRunnerSharedPool failed: %v", err)
+	}
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("create zstd reader: %v", err)
+	}
+	defer dec.Close()
+
+	raw, err := dec.DecodeAll(compressed, nil)
+	if err != nil {
+		t.Fatalf("decompress runner pool: %v", err)
+	}
+	if len(raw) < 16 || string(raw[:8]) != "MHBTPOOL" {
+		t.Fatalf("invalid MHBTPOOL header: %q", raw[:min(len(raw), 16)])
+	}
+	if version := binary.LittleEndian.Uint32(raw[8:12]); version != 1 {
+		t.Fatalf("expected pool version 1, got %d", version)
+	}
+	count := binary.LittleEndian.Uint32(raw[12:16])
+	if count != 4 {
+		t.Fatalf("expected 4 entries in runner pool, got %d", count)
+	}
+
+	got := make(map[string]string, count)
+	for i := uint32(0); i < count; i++ {
+		tocOff := 16 + int(i)*40
+		name := strings.TrimRight(string(raw[tocOff:tocOff+32]), "\x00")
+		off := binary.LittleEndian.Uint32(raw[tocOff+32 : tocOff+36])
+		length := binary.LittleEndian.Uint32(raw[tocOff+36 : tocOff+40])
+		got[name] = string(raw[off : off+length])
+	}
+
+	for _, name := range []string{"platform-windows-x86_64", "platform-windows-aarch64", "runtime-x86_64", "runtime-aarch64"} {
+		if got[name] != "payload-"+name {
+			t.Fatalf("entry %s = %q, want %q", name, got[name], "payload-"+name)
+		}
+	}
+	if _, exists := got["brain.wasm"]; exists {
+		t.Fatal("runner pool must not contain brain.wasm")
+	}
+
+	if _, err := buildRunnerSharedPool(AssemblyAssets{}); err == nil {
+		t.Fatal("expected buildRunnerSharedPool to fail when required assets are missing")
+	}
+}
+
+func TestAssembleRunner(t *testing.T) {
+	workDir := t.TempDir()
+	runnerExe := filepath.Join(workDir, "runner-base.exe")
+	host := make([]byte, 256)
+	host[0], host[1] = 'M', 'Z'
+	binary.LittleEndian.PutUint32(host[0x3c:0x40], 0x80)
+	copy(host[0x80:], []byte{'P', 'E', 0, 0})
+	if err := os.WriteFile(runnerExe, host, 0o644); err != nil {
+		t.Fatalf("write synthetic runner PE: %v", err)
+	}
+
+	writeAsset := func(name string) string {
+		t.Helper()
+		p := filepath.Join(workDir, name)
+		if err := os.WriteFile(p, []byte("runner-"+name), 0o644); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+		return p
+	}
+
+	assets := AssemblyAssets{
+		PlatformWindowsX86_64:  writeAsset("platform-windows-x86_64"),
+		PlatformWindowsAarch64: writeAsset("platform-windows-aarch64"),
+		RuntimeX86_64:          writeAsset("runtime-x86_64"),
+		RuntimeAarch64:         writeAsset("runtime-aarch64"),
+	}
+
+	outExe := filepath.Join(workDir, "mohabbat-runner.exe")
+	if err := assembleRunner(runnerExe, assets, outExe); err != nil {
+		t.Fatalf("assembleRunner failed: %v", err)
+	}
+
+	assembled, err := os.ReadFile(outExe)
+	if err != nil {
+		t.Fatalf("read assembled runner: %v", err)
+	}
+	if _, err := validatePE(assembled); err != nil {
+		t.Fatalf("validate assembled runner PE: %v", err)
+	}
+	if len(assembled) < len(host)+24 {
+		t.Fatalf("assembled runner too small: %d", len(assembled))
+	}
+
+	trailer := assembled[len(assembled)-24:]
+	if string(trailer[16:24]) != "MHBTTAIL" {
+		t.Fatalf("missing MHBTTAIL trailer: %q", trailer[16:24])
+	}
+	poolOffset := int(binary.LittleEndian.Uint64(trailer[0:8]))
+	poolLength := int(binary.LittleEndian.Uint64(trailer[8:16]))
+	if poolOffset != len(host) || poolOffset+poolLength != len(assembled)-24 {
+		t.Fatalf("unexpected pool bounds: offset=%d len=%d total=%d", poolOffset, poolLength, len(assembled))
+	}
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("create zstd reader: %v", err)
+	}
+	defer dec.Close()
+
+	rawPool, err := dec.DecodeAll(assembled[poolOffset:poolOffset+poolLength], nil)
+	if err != nil {
+		t.Fatalf("decompress appended runner pool: %v", err)
+	}
+	if string(rawPool[:8]) != "MHBTPOOL" {
+		t.Fatalf("invalid appended pool magic: %q", rawPool[:8])
 	}
 }

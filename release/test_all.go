@@ -79,6 +79,19 @@ type goTestEvent struct {
 }
 
 func runTestAll(ws string) error {
+	fmt.Println("🍆  Running unified workspace test suite (mohabbat-next/test)...")
+	cmd := exec.Command("go", "run", "./mohabbat-next/test")
+	cmd.Dir = ws
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mohabbat-next/test: %w", err)
+	}
+	return nil
+}
+
+func runTestAllLegacyMatrix(ws string) error {
 	logDir, err := createTestEvidenceDir(ws)
 	if err != nil {
 		return err

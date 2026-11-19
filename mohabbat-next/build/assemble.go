@@ -83,27 +83,12 @@ type AssemblyAssets struct {
 	BrainWasm              string
 }
 
-func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
-	if assets.BrainWasm == "" {
-		return nil, fmt.Errorf("application brain WASM is required")
-	}
+type poolItem struct {
+	name string
+	path string
+}
 
-	type poolItem struct {
-		name string
-		path string
-	}
-	items := []poolItem{
-		{name: "platform-windows-x86_64", path: assets.PlatformWindowsX86_64},
-		{name: "platform-windows-aarch64", path: assets.PlatformWindowsAarch64},
-		{name: "platform-linux-x86_64", path: assets.PlatformLinuxX86_64},
-		{name: "platform-linux-aarch64", path: assets.PlatformLinuxAarch64},
-		{name: "platform-darwin-x86_64", path: assets.PlatformDarwinX86_64},
-		{name: "platform-darwin-aarch64", path: assets.PlatformDarwinAarch64},
-		{name: "runtime-x86_64", path: assets.RuntimeX86_64},
-		{name: "runtime-aarch64", path: assets.RuntimeAarch64},
-		{name: "brain.wasm", path: assets.BrainWasm},
-	}
-
+func encodeSharedPool(items []poolItem) ([]byte, error) {
 	const headerSize = 16
 	const tocEntrySize = 40
 	tocSize := len(items) * tocEntrySize
@@ -142,6 +127,82 @@ func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
 	}
 
 	return compressZstandard(poolRaw)
+}
+
+func buildSharedPool(assets AssemblyAssets) ([]byte, error) {
+	if assets.BrainWasm == "" {
+		return nil, fmt.Errorf("application brain WASM is required")
+	}
+
+	items := []poolItem{
+		{name: "platform-windows-x86_64", path: assets.PlatformWindowsX86_64},
+		{name: "platform-windows-aarch64", path: assets.PlatformWindowsAarch64},
+		{name: "platform-linux-x86_64", path: assets.PlatformLinuxX86_64},
+		{name: "platform-linux-aarch64", path: assets.PlatformLinuxAarch64},
+		{name: "platform-darwin-x86_64", path: assets.PlatformDarwinX86_64},
+		{name: "platform-darwin-aarch64", path: assets.PlatformDarwinAarch64},
+		{name: "runtime-x86_64", path: assets.RuntimeX86_64},
+		{name: "runtime-aarch64", path: assets.RuntimeAarch64},
+		{name: "brain.wasm", path: assets.BrainWasm},
+	}
+
+	return encodeSharedPool(items)
+}
+
+func buildRunnerSharedPool(assets AssemblyAssets) ([]byte, error) {
+	items := []poolItem{
+		{name: "platform-windows-x86_64", path: assets.PlatformWindowsX86_64},
+		{name: "platform-windows-aarch64", path: assets.PlatformWindowsAarch64},
+		{name: "runtime-x86_64", path: assets.RuntimeX86_64},
+		{name: "runtime-aarch64", path: assets.RuntimeAarch64},
+	}
+
+	return encodeSharedPool(items)
+}
+
+func assembleRunner(windowsRunnerExe string, assets AssemblyAssets, outputExe string) error {
+	winExeBytes, err := os.ReadFile(windowsRunnerExe)
+	if err != nil {
+		return fmt.Errorf("read Windows runner executable %s: %w", windowsRunnerExe, err)
+	}
+	if _, err := validatePE(winExeBytes); err != nil {
+		return fmt.Errorf("validate base Windows runner PE: %w", err)
+	}
+
+	poolCompressed, err := buildRunnerSharedPool(assets)
+	if err != nil {
+		return err
+	}
+
+	bundle := new(bytes.Buffer)
+	if _, err := bundle.Write(winExeBytes); err != nil {
+		return err
+	}
+
+	poolOffset := int64(bundle.Len())
+	poolLength := int64(len(poolCompressed))
+	if _, err := bundle.Write(poolCompressed); err != nil {
+		return err
+	}
+
+	var trailer [24]byte
+	binary.LittleEndian.PutUint64(trailer[0:8], uint64(poolOffset))
+	binary.LittleEndian.PutUint64(trailer[8:16], uint64(poolLength))
+	copy(trailer[16:24], "MHBTTAIL")
+	if _, err := bundle.Write(trailer[:]); err != nil {
+		return err
+	}
+
+	completeBytes := bundle.Bytes()
+	if _, err := validatePE(completeBytes); err != nil {
+		return fmt.Errorf("validate assembled runner PE: %w", err)
+	}
+
+	if err := writeFileIfChanged(outputExe, completeBytes, 0o755); err != nil {
+		return fmt.Errorf("write output runner %s: %w", outputExe, err)
+	}
+
+	return nil
 }
 
 func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDir string, outputExe string) error {

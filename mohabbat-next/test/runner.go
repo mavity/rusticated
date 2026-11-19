@@ -23,6 +23,7 @@ type goModule struct {
 	Path       string
 	NativeGOOS []string
 	WasmTest   bool
+	Mod        string
 }
 
 type rustPackage struct {
@@ -37,6 +38,7 @@ type testRun struct {
 	idleTimeout  time.Duration
 	suiteTimeout time.Duration
 	filter       []string
+	toolchains   map[string]toolchainInfo
 	sink         *eventSink
 	firstError   error
 }
@@ -72,6 +74,8 @@ func newTestRun(root string, idleTimeout, suiteTimeout time.Duration, filter []s
 	if err != nil {
 		return nil, err
 	}
+	toolchains := probeToolchains()
+	sink.setRunMetadata(filter, toolchains)
 	return &testRun{
 		root:         root,
 		logDir:       logDir,
@@ -79,8 +83,50 @@ func newTestRun(root string, idleTimeout, suiteTimeout time.Duration, filter []s
 		idleTimeout:  idleTimeout,
 		suiteTimeout: suiteTimeout,
 		filter:       filter,
+		toolchains:   toolchains,
 		sink:         sink,
 	}, nil
+}
+
+func probeToolchains() map[string]toolchainInfo {
+	probes := []struct {
+		name string
+		args []string
+	}{
+		{name: "go", args: []string{"version"}},
+		{name: "node", args: []string{"--version"}},
+		{name: "zig", args: []string{"version"}},
+		{name: "cargo", args: []string{"--version"}},
+		{name: "rustc", args: []string{"--version"}},
+	}
+	result := make(map[string]toolchainInfo, len(probes))
+	for _, p := range probes {
+		result[p.name] = probeToolchain(p.name, p.args...)
+	}
+	return result
+}
+
+func probeToolchain(name string, args ...string) toolchainInfo {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return toolchainInfo{Available: false, Error: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	output, err := cmd.CombinedOutput()
+	version := strings.TrimSpace(string(output))
+	if idx := strings.IndexByte(version, '\n'); idx >= 0 {
+		version = strings.TrimSpace(version[:idx])
+	}
+	if err != nil {
+		errMsg := err.Error()
+		if version != "" {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, version)
+		}
+		return toolchainInfo{Available: false, Path: path, Error: errMsg}
+	}
+	return toolchainInfo{Available: true, Path: path, Version: version}
 }
 
 func (r *testRun) finish() error {
@@ -112,7 +158,7 @@ func (r *testRun) buildHost() {
 		Suite:  "Mohabbat-Next WASM test host",
 		Dir:    r.root,
 		Args: []string{
-			"go", "run", "./mohabbat-next/build", "-o", r.hostPath, "demo-go",
+			"go", "run", "./mohabbat-next/build", "-runner", "-o", r.hostPath,
 		},
 		Parse: outputEvents("build", "native"),
 	}
@@ -133,6 +179,10 @@ func (r *testRun) runNativeGo() {
 			continue
 		}
 		args := []string{"go", "test", "-json", "-count=1", "-p=1"}
+		if module.Mod != "" {
+			args = append(args, "-mod="+module.Mod)
+		}
+		pkgStart := len(args)
 		if r.matchesWholeModule(module.Path) {
 			args = append(args, "./...")
 		} else {
@@ -141,7 +191,7 @@ func (r *testRun) runNativeGo() {
 					args = append(args, pkg.ImportPath)
 				}
 			}
-			if len(args) == 5 {
+			if len(args) == pkgStart {
 				continue
 			}
 		}
@@ -152,6 +202,66 @@ func (r *testRun) runNativeGo() {
 			Dir:    filepath.Join(r.root, filepath.FromSlash(module.Path)),
 			Args:   args,
 			Parse:  parseGoJSON("go", "native-"+runtime.GOOS+"-"+runtime.GOARCH, module.Path),
+		})
+	}
+}
+
+func (r *testRun) runX64EmulatedGo() {
+	const target = "x64-emulated-windows-amd64"
+	supported, probe, symptom := supportsX64Emulated(runtime.GOOS, runtime.GOARCH)
+	env := setEnvironment(os.Environ(), map[string]string{
+		"GOOS":   "windows",
+		"GOARCH": "amd64",
+	})
+	for _, module := range workspaceGoModules {
+		if !supportsGOOS(module, "windows") {
+			continue
+		}
+		packages, err := r.listTestPackages(module, env)
+		if err != nil {
+			if !supported {
+				if r.matchesWholeModule(module.Path) || r.matches(module.Path) {
+					r.disable("go", target, module.Path, probe, symptom)
+				}
+				continue
+			}
+			r.fail(module.Path, "discover x64-emulated Go test packages: "+err.Error())
+			continue
+		}
+		if len(packages) == 0 {
+			continue
+		}
+		if !supported {
+			for _, pkg := range packages {
+				r.disable("go", target, pkg.ImportPath, probe, symptom)
+			}
+			continue
+		}
+		args := []string{"go", "test", "-json", "-count=1", "-p=1"}
+		if module.Mod != "" {
+			args = append(args, "-mod="+module.Mod)
+		}
+		pkgStart := len(args)
+		if r.matchesWholeModule(module.Path) {
+			args = append(args, "./...")
+		} else {
+			for _, pkg := range packages {
+				if r.matches(pkg.ImportPath) {
+					args = append(args, pkg.ImportPath)
+				}
+			}
+			if len(args) == pkgStart {
+				continue
+			}
+		}
+		r.runCommand(commandSpec{
+			Runner: "go",
+			Target: target,
+			Suite:  module.Path,
+			Dir:    filepath.Join(r.root, filepath.FromSlash(module.Path)),
+			Args:   args,
+			Env:    env,
+			Parse:  parseGoJSON("go", target, module.Path),
 		})
 	}
 }
@@ -178,10 +288,16 @@ func (r *testRun) runWasmGo() {
 	if len(selectedPackages) == 0 {
 		return
 	}
-	if !fileExists(r.hostPath) {
-		r.fail("Rusticated Go WASM", "test host is missing; run without -skip-build")
-		return
+	hostAvailable := false
+	if runtime.GOOS == "windows" {
+		if !fileExists(r.hostPath) {
+			r.fail("Rusticated Go WASM", "test host is missing; run without -skip-build")
+		} else {
+			hostAvailable = true
+		}
 	}
+	nodeHost := filepath.Join(r.root, "mohabbat", "washmhost", "js", "node", "index.js")
+	nodeInfo := r.toolchains["node"]
 	for _, pkg := range selectedPackages {
 		wasmPath := filepath.Join(r.logDir, "wasm", safeName(pkg.ImportPath)+".wasm")
 		if err := os.MkdirAll(filepath.Dir(wasmPath), 0o755); err != nil {
@@ -203,14 +319,32 @@ func (r *testRun) runWasmGo() {
 		}); err != nil {
 			continue
 		}
-		r.runCommand(commandSpec{
-			Runner: "go",
-			Target: "rusticated-wasm",
-			Suite:  pkg.ImportPath,
-			Dir:    pkg.Dir,
-			Args:   []string{r.hostPath, "--wasm", wasmPath, "--", "-test.v"},
-			Parse:  parseVerboseGoTest("go", "rusticated-wasm", pkg.ImportPath),
-		})
+		if runtime.GOOS != "windows" {
+			r.disable("go", "wasm-mohabbat", pkg.ImportPath, "runtime.GOOS="+runtime.GOOS, "wasm-mohabbat test host requires Windows")
+		} else if hostAvailable {
+			r.runCommand(commandSpec{
+				Runner: "go",
+				Target: "wasm-mohabbat",
+				Suite:  pkg.ImportPath,
+				Dir:    pkg.Dir,
+				Args:   []string{"go", "tool", "test2json", "-p", pkg.ImportPath, "-t", r.hostPath, wasmPath, "-test.v=test2json"},
+				Parse:  parseGoJSON("go", "wasm-mohabbat", pkg.ImportPath),
+			})
+		}
+		if !nodeInfo.Available {
+			r.disable("go", "wasm-node", pkg.ImportPath, "node --version", nodeInfo.Error)
+		} else if !fileExists(nodeHost) {
+			r.disable("go", "wasm-node", pkg.ImportPath, "stat mohabbat/washmhost/js/node/index.js", "missing Node WASM host")
+		} else {
+			r.runCommand(commandSpec{
+				Runner: "go",
+				Target: "wasm-node",
+				Suite:  pkg.ImportPath,
+				Dir:    pkg.Dir,
+				Args:   []string{"go", "tool", "test2json", "-p", pkg.ImportPath, "-t", "node", nodeHost, wasmPath, "-test.v=test2json"},
+				Parse:  parseGoJSON("go", "wasm-node", pkg.ImportPath),
+			})
+		}
 	}
 }
 
@@ -218,17 +352,7 @@ func (r *testRun) listWasmTestPackages(module goModule) ([]wasmTestPackage, erro
 	env := setEnvironment(os.Environ(), map[string]string{
 		"GOOS": "wasip1", "GOARCH": "wasm", "CGO_ENABLED": "0",
 	})
-	packages, err := r.listTestPackages(module, env)
-	if err != nil {
-		return nil, err
-	}
-	filtered := packages[:0]
-	for _, pkg := range packages {
-		if !isExcludedGoWasmPackage(pkg.ImportPath) {
-			filtered = append(filtered, pkg)
-		}
-	}
-	return filtered, nil
+	return r.listTestPackages(module, env)
 }
 
 func (r *testRun) listNativeTestPackages(module goModule) ([]wasmTestPackage, error) {
@@ -237,8 +361,12 @@ func (r *testRun) listNativeTestPackages(module goModule) ([]wasmTestPackage, er
 
 func (r *testRun) listTestPackages(module goModule, env []string) ([]wasmTestPackage, error) {
 	moduleDir := filepath.Join(r.root, filepath.FromSlash(module.Path))
-	cmd := exec.Command("go", "list", "-e", "-f",
-		`{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}|{{.Dir}}{{end}}`, "./...")
+	args := []string{"list", "-e"}
+	if module.Mod != "" {
+		args = append(args, "-mod="+module.Mod)
+	}
+	args = append(args, "-f", `{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}|{{.Dir}}{{end}}`, "./...")
+	cmd := exec.Command("go", args...)
 	cmd.Dir = moduleDir
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
@@ -258,13 +386,12 @@ func (r *testRun) listTestPackages(module goModule, env []string) ([]wasmTestPac
 	return packages, nil
 }
 
-func isExcludedGoWasmPackage(importPath string) bool {
-	for _, excluded := range []string{
-		"mohabbat/mohabbat-next/build",
-		"mohabbat/mohabbat-next/test",
-		"mohabbat/rusticated-go/syscall",
-	} {
-		if importPath == excluded || strings.HasPrefix(importPath, excluded+"/") {
+func supportsGOOS(module goModule, targetGOOS string) bool {
+	if len(module.NativeGOOS) == 0 {
+		return true
+	}
+	for _, goos := range module.NativeGOOS {
+		if targetGOOS == goos {
 			return true
 		}
 	}
@@ -272,15 +399,14 @@ func isExcludedGoWasmPackage(importPath string) bool {
 }
 
 func supportsNativeGOOS(module goModule) bool {
-	if len(module.NativeGOOS) == 0 {
-		return true
+	return supportsGOOS(module, runtime.GOOS)
+}
+
+func supportsX64Emulated(goos, goarch string) (bool, string, string) {
+	if goos == "windows" && goarch == "arm64" {
+		return true, "", ""
 	}
-	for _, goos := range module.NativeGOOS {
-		if runtime.GOOS == goos {
-			return true
-		}
-	}
-	return false
+	return false, fmt.Sprintf("runtime.GOOS=%s runtime.GOARCH=%s", goos, goarch), "x64-emulated-windows-amd64 requires windows/arm64 host"
 }
 
 func (r *testRun) matchesWholeModule(modulePath string) bool {
@@ -333,7 +459,7 @@ func (r *testRun) runRustWasm() {
 			"cargo", "test", "-p", pkg.Name, "--target", "wasm32-rusticated-unknown-unknown",
 			"--config", target, "--config", "unstable.json-target-spec=true",
 			"--config", fmt.Sprintf(
-				`target.wasm32-rusticated-unknown-unknown.runner=[%s,"--wasm"]`,
+				`target.wasm32-rusticated-unknown-unknown.runner=[%s]`,
 				strconv.Quote(r.hostPath),
 			),
 			"-Z", "unstable-options", "--message-format=json", "--", "--format=json",
@@ -349,27 +475,197 @@ func (r *testRun) runRustWasm() {
 	}
 }
 
+type zigTestSource struct {
+	Path       string
+	NativeGOOS string
+	UsesPalABI bool
+	UsesZwasm  bool
+}
+
 func (r *testRun) runZig() {
+	zigInfo := r.toolchains["zig"]
 	for _, source := range zigTestSources {
-		if !r.matches(source) {
+		if !r.matches(source.Path) {
 			continue
+		}
+		targetOS := source.NativeGOOS
+		if targetOS == "" {
+			targetOS = runtime.GOOS
+		}
+		target := "native-" + targetOS + "-" + runtime.GOARCH
+		if targetOS != runtime.GOOS {
+			r.disable(
+				"zig", target, source.Path,
+				"runtime.GOOS="+targetOS,
+				"the native host OS does not match this platform-specific Zig suite; Linux/WSL execution is deferred",
+			)
+			continue
+		}
+		if !zigInfo.Available {
+			r.disable("zig", target, source.Path, "zig version", zigInfo.Error)
+			continue
+		}
+		if source.UsesZwasm {
+			zwasmEntry := filepath.Join(r.root, "mohabbat-next", ".build", "zig", "zwasm-overlay", "src", "zwasm.zig")
+			if !fileExists(zwasmEntry) {
+				r.disable("zig", target, source.Path, "stat "+zwasmEntry, "zwasm overlay not prepared; run without -skip-build")
+				continue
+			}
 		}
 		r.runCommand(commandSpec{
 			Runner: "zig",
-			Target: "native-" + runtime.GOOS + "-" + runtime.GOARCH,
-			Suite:  source,
+			Target: target,
+			Suite:  source.Path,
 			Dir:    r.root,
-			Args:   []string{"zig", "test", filepath.FromSlash(source)},
-			Parse:  parseZigTestOutput("zig", "native-"+runtime.GOOS+"-"+runtime.GOARCH, source),
+			Args:   zigTestArgs(r.root, source),
+			Parse:  parseGoJSON("zig", target, source.Path),
 		})
 	}
 }
 
-var zigTestSources = []string{
-	"mohabbat-next/pal/abi/guest.zig",
-	"mohabbat-next/runtime/src/pal_bridge.zig",
-	"mohabbat-next/brot/unix/src/decompress.zig",
-	"mohabbat-next/brot/unix/src/pool.zig",
+func zigTestArgs(root string, source zigTestSource) []string {
+	runnerPath := filepath.Join(root, "mohabbat-next", "test", "zig_test_runner.zig")
+	args := []string{"zig", "test", "--test-runner", runnerPath}
+	rootArg := "-Mroot=" + filepath.Join(root, filepath.FromSlash(source.Path))
+	if !source.UsesPalABI && !source.UsesZwasm {
+		return append(args, filepath.FromSlash(source.Path))
+	}
+	if source.UsesPalABI {
+		args = append(args, "--dep", "pal_abi")
+	}
+	if source.UsesZwasm {
+		args = append(args, "--dep", "zwasm")
+	}
+	args = append(args, rootArg)
+	if source.UsesPalABI {
+		args = append(args, "-Mpal_abi="+filepath.Join(root, "mohabbat-next", "pal", "abi", "guest.zig"))
+	}
+	if source.UsesZwasm {
+		args = append(args,
+			"--dep", "build_options",
+			"-Mzwasm="+filepath.Join(root, "mohabbat-next", ".build", "zig", "zwasm-overlay", "src", "zwasm.zig"),
+			"-Mbuild_options="+filepath.Join(root, "mohabbat-next", "runtime", "src", "build_options.zig"),
+		)
+	}
+	return args
+}
+
+var zigTestSources = []zigTestSource{
+	{Path: "mohabbat-next/pal/abi/guest.zig"},
+	{Path: "mohabbat-next/pal/windows/platform.zig", NativeGOOS: "windows", UsesPalABI: true},
+	{Path: "mohabbat-next/pal/unix/platform_linux.zig", NativeGOOS: "linux", UsesPalABI: true},
+	{Path: "mohabbat-next/runtime/src/pal_bridge.zig"},
+	{Path: "mohabbat-next/runtime/src/main.zig", UsesPalABI: true, UsesZwasm: true},
+	{Path: "mohabbat-next/brot/unix/src/decompress.zig"},
+	{Path: "mohabbat-next/brot/unix/src/pool.zig"},
+	{Path: "mohabbat-next/brot/unix/src/main.zig"},
+}
+
+var nodeTestRoots = []string{
+	"mohabbat/washmhost/js/node",
+	"kabibi/vscode",
+}
+
+func (r *testRun) runNode() {
+	files, err := r.discoverNodeTestFiles()
+	if err != nil {
+		r.fail("node", "discover Node test files: "+err.Error())
+		return
+	}
+	var selected []string
+	for _, relPath := range files {
+		if r.matches(relPath) {
+			selected = append(selected, relPath)
+		}
+	}
+	if len(selected) == 0 {
+		return
+	}
+
+	target := "native-" + runtime.GOOS + "-" + runtime.GOARCH
+	nodeInfo := r.toolchains["node"]
+	if !nodeInfo.Available {
+		for _, relPath := range selected {
+			r.disable("node", target, relPath, "node --version", nodeInfo.Error)
+		}
+		return
+	}
+
+	for _, relPath := range selected {
+		if relPath == "kabibi/vscode/test/desktop-host.integration.test.js" {
+			kabibiBat := filepath.Join(r.root, "release", "dist", "kabibi.bat")
+			if !fileExists(kabibiBat) {
+				r.disable("node", target, relPath, "stat release/dist/kabibi.bat", "missing development vegetable")
+				continue
+			}
+			plat, arch := nodePlatformArch()
+			addonName := fmt.Sprintf("nodepty-%s-%s.node", plat, arch)
+			addonPath := filepath.Join(r.root, "kabibi", "vscode", addonName)
+			if !fileExists(addonPath) {
+				r.disable("node", target, relPath, "stat kabibi/vscode/"+addonName, "missing native Node PTY addon")
+				continue
+			}
+		}
+		r.runCommand(commandSpec{
+			Runner: "node",
+			Target: target,
+			Suite:  relPath,
+			Dir:    r.root,
+			Args:   []string{"node", "--test", "--test-reporter=tap", filepath.FromSlash(relPath)},
+			Parse:  parseNodeTAP("node", target, relPath),
+		})
+	}
+}
+
+func (r *testRun) discoverNodeTestFiles() ([]string, error) {
+	var files []string
+	for _, rootRel := range nodeTestRoots {
+		rootAbs := filepath.Join(r.root, filepath.FromSlash(rootRel))
+		if _, err := os.Stat(rootAbs); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		err := filepath.WalkDir(rootAbs, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			name := entry.Name()
+			if entry.IsDir() {
+				if name == "node_modules" || (strings.HasPrefix(name, ".") && path != rootAbs) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(name, ".test.js") || strings.HasSuffix(name, ".test.mjs") {
+				rel, err := filepath.Rel(r.root, path)
+				if err != nil {
+					return err
+				}
+				files = append(files, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+func nodePlatformArch() (string, string) {
+	platform := runtime.GOOS
+	if platform == "windows" {
+		platform = "win32"
+	}
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x64"
+	case "386":
+		arch = "ia32"
+	}
+	return platform, arch
 }
 
 func (r *testRun) runCommand(spec commandSpec) error {
@@ -389,6 +685,28 @@ func (r *testRun) runCommand(spec commandSpec) error {
 		r.firstError = errors.Join(r.firstError, fmt.Errorf("%s: %w", spec.Suite, err))
 	}
 	return err
+}
+
+func (r *testRun) disable(runner, target, name, probe, symptom string) {
+	detail := strings.TrimSpace(probe)
+	if symptom = strings.TrimSpace(symptom); symptom != "" {
+		if detail != "" {
+			detail += ": " + symptom
+		} else {
+			detail = symptom
+		}
+	}
+	event := testEvent{
+		Kind:   "disabled",
+		Runner: runner,
+		Target: target,
+		Suite:  name,
+		Name:   name,
+		Detail: detail,
+	}
+	if err := r.sink.emit(event); err != nil {
+		r.firstError = errors.Join(r.firstError, err)
+	}
 }
 
 func (r *testRun) fail(suite, detail string) {
@@ -436,6 +754,7 @@ var workspaceGoModules = []goModule{
 	{Path: "platform", WasmTest: true},
 	{Path: "pope", WasmTest: true},
 	{Path: "rusticated-go/internal/filepathlite", WasmTest: true},
+	{Path: "u-root", WasmTest: true, Mod: "mod"},
 }
 
 var rustWorkspacePackages = []rustPackage{
@@ -543,6 +862,42 @@ func parseZigTestOutput(runner, target, suite string) func(string, string) []tes
 			name = name[index+len(".test."):]
 		}
 		kind := map[string]string{"OK": "pass", "FAIL": "fail", "SKIP": "skip"}[match[2]]
+		return []testEvent{
+			{Kind: "run", Runner: runner, Target: target, Suite: suite, Name: name},
+			{Kind: kind, Runner: runner, Target: target, Suite: suite, Name: name},
+		}
+	}
+}
+
+var tapTestLine = regexp.MustCompile(`^(ok|not ok)\s+\d+\s+(?:-\s+)?(.+)$`)
+
+func parseNodeTAP(runner, target, suite string) func(string, string) []testEvent {
+	return func(stream, line string) []testEvent {
+		trimmed := strings.TrimRight(line, " \t\r\n")
+		match := tapTestLine.FindStringSubmatch(trimmed)
+		if len(match) != 3 {
+			if trimmed != "" {
+				return outputEvents(runner, target)(stream, line)
+			}
+			return nil
+		}
+		status := match[1]
+		name := strings.TrimSpace(match[2])
+		kind := "pass"
+		if status == "not ok" {
+			kind = "fail"
+		}
+		if idx := strings.LastIndex(name, " # "); idx >= 0 {
+			directive := strings.TrimSpace(name[idx+3:])
+			upper := strings.ToUpper(directive)
+			if upper == "SKIP" || strings.HasPrefix(upper, "SKIP ") {
+				kind = "skip"
+				name = strings.TrimSpace(name[:idx])
+			} else if upper == "TODO" || strings.HasPrefix(upper, "TODO ") {
+				kind = "skip"
+				name = strings.TrimSpace(name[:idx])
+			}
+		}
 		return []testEvent{
 			{Kind: "run", Runner: runner, Target: target, Suite: suite, Name: name},
 			{Kind: kind, Runner: runner, Target: target, Suite: suite, Name: name},

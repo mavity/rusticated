@@ -23,10 +23,11 @@ components, and the target application's `brain.wasm` in one shared compressed
 pool. The Windows host reads the pool through the `MHBTTAIL` trailer; Unix
 launchers extract and run the matching Brot component.
 
-The host enters the runtime slice with the embedded application WASM module.
-Application arguments are forwarded to the guest. The Windows test launcher
-can select a test WASM module with the host-only `--wasm <path> -- <args>`
-options; normal application builds continue to use the embedded module.
+The production host (`Program.cs`) enters the runtime slice with the embedded
+application WASM module and forwards application arguments to the guest. For
+standalone WASM execution (`-r` and `-t`), `go run ./mohabbat-next/build -runner`
+assembles a separate payload-free runner (`Runner.cs`) containing only the
+Windows PAL and `zwasm` runtime slices, which accepts `<module.wasm> [args...]`.
 
 ## Build and run
 
@@ -57,30 +58,30 @@ go run ./mohabbat-next/test
 go run ./mohabbat-next/test -p kabibi
 ```
 
-It runs native Go suites, eligible Go suites compiled for Rusticated WASM and
-executed by the Windows Mohabbat-Next host, Rust workspace tests for the
-Rusticated WASM target, and native Zig unit suites available on the current
-host. `-skip-native`, `-skip-wasm`, `-skip-rust`, and `-skip-zig` select
-subsets; `-skip-build` reuses `target/test-host/MohabbatNextTestHost.exe`.
+`go run ./release --test-all` delegates to the same launcher before building
+release vegetables.
+
+It runs native Go suites, Windows x64-emulated Go suites on Windows ARM64,
+Go suites compiled for Rusticated WASM and executed via `go tool test2json` on
+both the payload-free Mohabbat-Next runner (`wasm-mohabbat`) and the Node
+host (`wasm-node`), Rust tests for `wasm32-rusticated-unknown-unknown` using
+the testing-enabled Rusticated sysroot (`rusticated-test`) and the payload-free
+runner, native Zig unit suites via `zig_test_runner.zig`, and Node TAP suites in
+`mohabbat/washmhost/js/node` and `kabibi/vscode`. `-skip-native`,
+`-skip-x64-emulated`, `-skip-wasm`, `-skip-rust`, `-skip-zig`, and `-skip-node`
+select subsets; `-skip-build` reuses `target/test-host/MohabbatNextTestHost.exe`.
 The inactivity timeout defaults to three minutes and the per-suite timeout
 defaults to thirty minutes. Override them with `-stdio-idle-timeout` and
 `-suite-timeout`.
 
 Each invocation creates `target/test-runs/<run-id>/` with streamed
-`events.jsonl`, a final `summary.json`, and per-suite stdout/stderr logs.
-Filter by a project path or package suffix with `-p`; comma-separated filters
-are supported. The launcher exits unsuccessfully if the selection executes no
-test cases or any runner fails.
+`events.jsonl`, a final `summary.json` (including per-runner/target counts),
+`manifest.json` (host, filters, toolchain probes, and aggregate counts), and
+per-suite stdout/stderr logs. Filter by a project path or package suffix with
+`-p`; comma-separated filters are supported. Unavailable runner/target
+combinations are emitted as `disabled` events with probe and symptom. The
+launcher exits unsuccessfully if the selection executes no test cases or any
+runner fails.
 
-Rusticated-WASM tests explicitly exclude Go custom-sysroot packages that cannot
-be tested as standalone modules, skip cases requiring host Go/Cargo toolchains,
-and skip cases that exceed the guest's memory, stack, or inactivity budgets.
-Those cases remain enabled in native Go runs.
-
-The current custom Rust target cannot build Cargo's standard unit-test
-harness: its sysroot lacks Rust's `test` crate, and compiling the Rusticated
-`std` crate with `cfg(test)` also produces duplicate `panic_impl` lang items.
-The launcher records these as test-run failures rather than treating a
-compile-only result as a pass. A Rusticated-specific test harness, including
-dedicated native Rusticated ABI coverage, is still needed. Linux/WSL test-host
-support is also not implemented yet.
+Go WASM suites are not silently excluded: unsupported or failing packages
+remain visible as failures. Linux/WSL execution is deferred.

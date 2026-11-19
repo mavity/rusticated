@@ -60,11 +60,13 @@ func checkTools() error {
 func main() {
 	var (
 		verbose    bool
+		runnerMode bool
 		outputPath string
 	)
 
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose build output")
+	flag.BoolVar(&runnerMode, "runner", false, "Build payload-free Windows WASM runner")
 	flag.StringVar(&outputPath, "o", "", "Output executable path")
 	flag.StringVar(&outputPath, "out", "", "Output executable path")
 	flag.Parse()
@@ -81,13 +83,24 @@ func main() {
 	}
 
 	repoRoot := filepath.Dir(nextDir)
-	if flag.NArg() != 1 || strings.TrimSpace(flag.Arg(0)) == "" {
-		fmt.Fprintln(os.Stderr, "Error: an application target is required (usage: build [flags] <target>)")
-		os.Exit(2)
-	}
-	targetName := strings.TrimSpace(flag.Arg(0))
-	if outputPath == "" {
-		outputPath = filepath.Join(repoRoot, "release", "dist", targetName+".exe")
+	var targetName string
+	if runnerMode {
+		if flag.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "Error: -runner does not take a target argument (usage: build -runner [-o <out.exe>])")
+			os.Exit(2)
+		}
+		if outputPath == "" {
+			outputPath = filepath.Join(repoRoot, "release", "dist", "mohabbat-runner.exe")
+		}
+	} else {
+		if flag.NArg() != 1 || strings.TrimSpace(flag.Arg(0)) == "" {
+			fmt.Fprintln(os.Stderr, "Error: an application target is required (usage: build [flags] <target>)")
+			os.Exit(2)
+		}
+		targetName = strings.TrimSpace(flag.Arg(0))
+		if outputPath == "" {
+			outputPath = filepath.Join(repoRoot, "release", "dist", targetName+".exe")
+		}
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -116,12 +129,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	brainWasmPath := filepath.Join(componentsDir, targetName+".wasm")
-	targetDir := filepath.Join(repoRoot, targetName)
-	fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
-	if err := mohabbat.BuildGoBrainWasm(repoRoot, targetDir, brainWasmPath, verbose); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n", targetName, err)
-		os.Exit(1)
+	var brainWasmPath string
+	if !runnerMode {
+		brainWasmPath = filepath.Join(componentsDir, targetName+".wasm")
+		targetDir := filepath.Join(repoRoot, targetName)
+		fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
+		if err := mohabbat.BuildGoBrainWasm(repoRoot, targetDir, brainWasmPath, verbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n", targetName, err)
+			os.Exit(1)
+		}
 	}
 
 	// Step 2: Build Zig flat components and Brot micro-launchers in parallel
@@ -280,6 +296,9 @@ func main() {
 
 	// Spawn flat component compilation goroutines
 	for _, def := range flatDefs {
+		if runnerMode && !strings.HasPrefix(def.Name, "runtime-") && !strings.HasPrefix(def.Name, "platform-windows-") {
+			continue
+		}
 		compileWg.Add(1)
 		go func(def ZigFlatConfig) {
 			defer compileWg.Done()
@@ -297,16 +316,18 @@ func main() {
 	}
 
 	// Spawn Brot runner compilation goroutines
-	for _, bcfg := range brotConfigs {
-		compileWg.Add(1)
-		go func(bcfg ZigBrotConfig) {
-			defer compileWg.Done()
-			if _, err := buildZigBrotRunner(nextDir, unixOutDir, bcfg, verbose); err != nil {
-				compileMu.Lock()
-				errs = append(errs, fmt.Errorf("brot runner %s: %w", bcfg.Name, err))
-				compileMu.Unlock()
-			}
-		}(bcfg)
+	if !runnerMode {
+		for _, bcfg := range brotConfigs {
+			compileWg.Add(1)
+			go func(bcfg ZigBrotConfig) {
+				defer compileWg.Done()
+				if _, err := buildZigBrotRunner(nextDir, unixOutDir, bcfg, verbose); err != nil {
+					compileMu.Lock()
+					errs = append(errs, fmt.Errorf("brot runner %s: %w", bcfg.Name, err))
+					compileMu.Unlock()
+				}
+			}(bcfg)
+		}
 	}
 
 	compileWg.Wait()
@@ -320,55 +341,76 @@ func main() {
 	// Step 3: Windows CLR host embeds only ZstdSharp; all native/WASM components live in the shared compressed pool.
 	fmt.Println("🍆  [3/5] Preparing Windows CLR Host (shared compressed pool will be appended)...")
 
-	// Step 4: Build Windows AnyCPU CLR Host
-	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
-	windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
-	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, "anycpu", verbose); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Step 5: Vegetable Assembly
-	fmt.Println("🍆  [5/5] Assembling unified single-file vegetable...")
-
-	brotNames := []string{
-		"brot-x86_64-unknown-linux-gnu",
-		"brot-aarch64-unknown-linux-gnu",
-		"brot-aarch64-linux-android",
-		"brot-x86_64-apple-darwin",
-		"brot-aarch64-apple-darwin",
-	}
-
-	brotPaths := make(map[string]string)
-	for _, name := range brotNames {
-		p := filepath.Join(unixOutDir, name)
-		if _, err := os.Stat(p); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: missing required Brot runner: %s\n", p)
+	if runnerMode {
+		fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Runner (MohabbatWindowsRunner.exe)...")
+		windowsRunnerExe := filepath.Join(workDir, "MohabbatWindowsRunner.exe")
+		if err := buildWindowsRunnerExe(windowsHostDir, workDir, windowsRunnerExe, "anycpu", verbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building Windows runner: %v\n", err)
 			os.Exit(1)
 		}
-		brotPaths[name] = p
-	}
 
-	assemblyAssets := AssemblyAssets{
-		BrotLinuxX86_64:        brotPaths["brot-x86_64-unknown-linux-gnu"],
-		BrotLinuxAarch64:       brotPaths["brot-aarch64-unknown-linux-gnu"],
-		BrotAndroidAarch64:     brotPaths["brot-aarch64-linux-android"],
-		BrotDarwinX86_64:       brotPaths["brot-x86_64-apple-darwin"],
-		BrotDarwinAarch64:      brotPaths["brot-aarch64-apple-darwin"],
-		PlatformWindowsX86_64:  builtBins["platform-windows-x86_64"],
-		PlatformWindowsAarch64: builtBins["platform-windows-aarch64"],
-		PlatformLinuxX86_64:    builtBins["platform-linux-x86_64"],
-		PlatformLinuxAarch64:   builtBins["platform-linux-aarch64"],
-		PlatformDarwinX86_64:   builtBins["platform-darwin-x86_64"],
-		PlatformDarwinAarch64:  builtBins["platform-darwin-aarch64"],
-		RuntimeX86_64:          builtBins["runtime-x86_64"],
-		RuntimeAarch64:         builtBins["runtime-aarch64"],
-		BrainWasm:              brainWasmPath,
-	}
+		fmt.Println("🍆  [5/5] Assembling payload-free Windows runner...")
+		runnerAssets := AssemblyAssets{
+			PlatformWindowsX86_64:  builtBins["platform-windows-x86_64"],
+			PlatformWindowsAarch64: builtBins["platform-windows-aarch64"],
+			RuntimeX86_64:          builtBins["runtime-x86_64"],
+			RuntimeAarch64:         builtBins["runtime-aarch64"],
+		}
+		if err := assembleRunner(windowsRunnerExe, runnerAssets, outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error during runner assembly: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// Step 4: Build Windows AnyCPU CLR Host
+		fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
+		windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
+		if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, "anycpu", verbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
+			os.Exit(1)
+		}
 
-	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error during vegetable assembly: %v\n", err)
-		os.Exit(1)
+		// Step 5: Vegetable Assembly
+		fmt.Println("🍆  [5/5] Assembling unified single-file vegetable...")
+
+		brotNames := []string{
+			"brot-x86_64-unknown-linux-gnu",
+			"brot-aarch64-unknown-linux-gnu",
+			"brot-aarch64-linux-android",
+			"brot-x86_64-apple-darwin",
+			"brot-aarch64-apple-darwin",
+		}
+
+		brotPaths := make(map[string]string)
+		for _, name := range brotNames {
+			p := filepath.Join(unixOutDir, name)
+			if _, err := os.Stat(p); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: missing required Brot runner: %s\n", p)
+				os.Exit(1)
+			}
+			brotPaths[name] = p
+		}
+
+		assemblyAssets := AssemblyAssets{
+			BrotLinuxX86_64:        brotPaths["brot-x86_64-unknown-linux-gnu"],
+			BrotLinuxAarch64:       brotPaths["brot-aarch64-unknown-linux-gnu"],
+			BrotAndroidAarch64:     brotPaths["brot-aarch64-linux-android"],
+			BrotDarwinX86_64:       brotPaths["brot-x86_64-apple-darwin"],
+			BrotDarwinAarch64:      brotPaths["brot-aarch64-apple-darwin"],
+			PlatformWindowsX86_64:  builtBins["platform-windows-x86_64"],
+			PlatformWindowsAarch64: builtBins["platform-windows-aarch64"],
+			PlatformLinuxX86_64:    builtBins["platform-linux-x86_64"],
+			PlatformLinuxAarch64:   builtBins["platform-linux-aarch64"],
+			PlatformDarwinX86_64:   builtBins["platform-darwin-x86_64"],
+			PlatformDarwinAarch64:  builtBins["platform-darwin-aarch64"],
+			RuntimeX86_64:          builtBins["runtime-x86_64"],
+			RuntimeAarch64:         builtBins["runtime-aarch64"],
+			BrainWasm:              brainWasmPath,
+		}
+
+		if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error during vegetable assembly: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	outputBytes, err := os.ReadFile(outputPath)
 	if err != nil {

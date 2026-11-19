@@ -111,6 +111,14 @@ func ensureZstdSharpDll(windowsHostDir, workDir string, verbose bool) (string, e
 }
 
 func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, verbose bool) error {
+	return buildWindowsHostExeWithSource(windowsHostDir, "Program.cs", workDir, outExePath, platform, verbose)
+}
+
+func buildWindowsRunnerExe(windowsHostDir, workDir, outExePath, platform string, verbose bool) error {
+	return buildWindowsHostExeWithSource(windowsHostDir, "Runner.cs", workDir, outExePath, platform, verbose)
+}
+
+func buildWindowsHostExeWithSource(windowsHostDir, sourceFileName, workDir, outExePath, platform string, verbose bool) error {
 	compiler, err := findWindowsCompiler()
 	if err != nil {
 		return err
@@ -122,7 +130,7 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, v
 	}
 
 	manifest := filepath.Join(windowsHostDir, "WindowsHost.manifest")
-	programCs := filepath.Join(windowsHostDir, "Program.cs")
+	programCs := filepath.Join(windowsHostDir, sourceFileName)
 
 	isWindowsBinary := strings.HasSuffix(compiler, ".exe") && runtime.GOOS != "windows"
 

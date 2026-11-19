@@ -1,0 +1,12 @@
+[package]
+name = "rusticated-test"
+version = "0.8.40"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+name = "test"
+bench = false
+doctest = false

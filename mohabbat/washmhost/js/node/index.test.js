@@ -836,3 +836,22 @@ test('net_accept returns EBADF for missing handles and EINVAL for non-listeners'
     env.net_accept(64, 1n);
     assert.equal(view.getUint32(68, true), 28);
 });
+
+test('path_remove removes an empty directory with flag 0x200', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-rmdir-'));
+    const subDir = path.join(tmpDir, 'empty-dir');
+    fs.mkdirSync(subDir);
+    try {
+        const memory = new WebAssembly.Memory({ initial: 1 });
+        const host = new HostState({ listenProcessSignals: false });
+        host.memory = memory;
+        const { env } = makeBrainImports(host, []);
+        const len = writeString(memory, 256, subDir);
+        env.path_remove(64, 256, len, 0x200);
+        const err = await waitForHostResult(host, memory, 64);
+        assert.equal(err, 0);
+        assert.equal(fs.existsSync(subDir), false);
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});

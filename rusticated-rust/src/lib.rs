@@ -13,7 +13,9 @@
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
+#[cfg_attr(test, allow(unused_extern_crates))]
 pub extern crate alloc;
+#[cfg(not(test))]
 mod allocator;
 
 /// Prelude for the standard library.
@@ -500,6 +502,7 @@ pub mod traits;
 /// Terminal interface types
 pub mod tty;
 
+#[cfg(not(test))]
 mod lib_intrinsics;
 
 // -- std-shaped re-exports from core / alloc ---------------------------------

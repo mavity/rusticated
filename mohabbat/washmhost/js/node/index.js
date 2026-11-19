@@ -1467,7 +1467,7 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
         return;
       }
       const removePromise = st.isDirectory()
-        ? (fs.promises.rm ? fs.promises.rm(pathStr) : fs.promises.rmdir(pathStr)) // apparently rm and rmdir are similar, but latter is deprecated
+        ? fs.promises.rmdir(pathStr)
         : fs.promises.unlink(pathStr);
       return removePromise.then(() => {
         hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
