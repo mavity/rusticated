@@ -1,11 +1,16 @@
 package shell
 
 import (
+	"bytes"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"ai"
 	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 )
@@ -63,6 +68,54 @@ func TestBuildPathCacheSnapshotIndexesPATHExecutablesAndWindowsExtensions(t *tes
 	}
 	if _, ok := windowsSnapshot.commands["not-command.txt"]; ok {
 		t.Fatal("file outside PATHEXT was indexed as a command")
+	}
+}
+
+func TestWindowsPathCacheIndexesSymlinkNamesWithoutResolving(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "store-app.exe")
+	if err := os.Symlink(filepath.Join(dir, "missing-target.exe"), link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	snapshot := buildPathCacheSnapshot(pathCacheKey{
+		path:        dir,
+		pathExt:     ".EXE",
+		windowsLike: true,
+	})
+	for _, name := range []string{"store-app", "store-app.exe"} {
+		if _, ok := snapshot.commands[name]; !ok {
+			t.Errorf("Windows PATH cache omitted symlink name %q", name)
+		}
+	}
+}
+
+func TestCompletionFilesystemErrorsRequireVerboseMode(t *testing.T) {
+	previousVerbose := ai.Verbose
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	t.Cleanup(func() {
+		ai.Verbose = previousVerbose
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	err := errors.New("path lookup failed")
+
+	ai.Verbose = false
+	logUnexpectedCompletionFSError("resolve command symlink", "command.exe", err)
+	if output.Len() != 0 {
+		t.Fatalf("non-verbose completion log = %q, want no output", output.String())
+	}
+
+	ai.Verbose = true
+	logUnexpectedCompletionFSError("resolve command symlink", "command.exe", err)
+	if got := output.String(); !strings.Contains(got, "resolve command symlink") ||
+		!strings.Contains(got, "path lookup failed") {
+		t.Fatalf("verbose completion log = %q, want operation and error details", got)
 	}
 }
 

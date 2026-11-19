@@ -1,7 +1,7 @@
 package shell
 
 import (
-	"errors"
+	"ai"
 	"log"
 	"os"
 	"path/filepath"
@@ -261,6 +261,10 @@ func indexCommandDirectory(commands map[string]struct{}, dir string, key pathCac
 	for _, entry := range entries {
 		name := entry.Name()
 		fullPath := filepath.Join(dir, name)
+		if key.windowsLike {
+			indexWindowsCommand(commands, name, extensions)
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			logUnexpectedCompletionFSError("inspect command entry", fullPath, err)
@@ -277,9 +281,7 @@ func indexCommandDirectory(commands map[string]struct{}, dir string, key pathCac
 			continue
 		}
 
-		if key.windowsLike {
-			indexWindowsCommand(commands, name, extensions)
-		} else if info.Mode()&0o111 != 0 {
+		if info.Mode()&0o111 != 0 {
 			commands[cacheCommandName(name, false)] = struct{}{}
 		}
 	}
@@ -296,10 +298,9 @@ func indexWindowsCommand(commands map[string]struct{}, name string, extensions m
 }
 
 func logUnexpectedCompletionFSError(operation, path string, err error) {
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-		return
+	if ai.Verbose {
+		log.Printf("shell completion: %s %q: %v", operation, path, err)
 	}
-	log.Printf("shell completion: %s %q: %v", operation, path, err)
 }
 
 func pathCacheExtensions(pathExt string, windowsLike bool) map[string]struct{} {
