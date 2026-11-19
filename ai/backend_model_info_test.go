@@ -57,25 +57,14 @@ func (d *modelInfoTestDriver) loadedFileModalitySupportedBackends(uint64, int32)
 	return nil, d.getterError("supported backends")
 }
 
-func TestSharedInspectModelNormalizesMangledWindowsPaths(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		path string
-		want string
-	}{
-		{name: "backslash prefix", path: `\C:\models\model.litertlm`, want: `C:\models\model.litertlm`},
-		{name: "slash prefix", path: `/C:/models/model.litertlm`, want: `C:\models\model.litertlm`},
-		{name: "relative path", path: `models\model.litertlm`, want: `models\model.litertlm`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			driver := &modelInfoTestDriver{}
-			if _, err := sharedInspectModel(driver, "library", test.path); err != nil {
-				t.Fatalf("sharedInspectModel() error = %v", err)
-			}
-			if driver.marshaledString != test.want {
-				t.Fatalf("marshaled model path = %q, want %q", driver.marshaledString, test.want)
-			}
-		})
+func TestSharedInspectModelPreservesModelPath(t *testing.T) {
+	driver := &modelInfoTestDriver{}
+	const modelPath = `models\model.litertlm`
+	if _, err := sharedInspectModel(driver, "library", modelPath); err != nil {
+		t.Fatalf("sharedInspectModel() error = %v", err)
+	}
+	if driver.marshaledString != modelPath {
+		t.Fatalf("marshaled model path = %q, want %q", driver.marshaledString, modelPath)
 	}
 }
 

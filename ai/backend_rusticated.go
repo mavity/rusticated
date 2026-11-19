@@ -125,7 +125,6 @@ func (d *rusticatedDriver) ensureLoaded(libPath string) error {
 }
 
 func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func(), error) {
-	s = normalizeHostNativePath(s)
 	ptr, free, err := dload.CString(lmLib, s)
 	if err != nil {
 		return 0, nil, fmt.Errorf("allocate LiteRT-LM string: %w", err)

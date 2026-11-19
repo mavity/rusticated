@@ -738,20 +738,6 @@ func TestLocalGemmaLoadModelInfoAndBackendDiscoveryWhenCached(t *testing.T) {
 	t.Logf("Verified cached tier %s (%s): MaxContextTokens=%d SupportedBackends=%v",
 		cachedTierID, modelPath, info.MaxContextTokens, info.SupportedBackends)
 
-	// Also verify that even if a legacy path with a leading '\' or '/' before the drive letter
-	// is passed to LoadModelInfo, normalizeHostNativePath strips it so LiteRT-LM still loads it.
-	if assets.HostOS() == "windows" && len(modelPath) >= 3 && modelPath[1] == ':' {
-		for _, mangled := range []string{
-			`\` + modelPath,
-			`/` + strings.ReplaceAll(modelPath, `\`, `/`),
-		} {
-			mInfo, mErr := LoadModelInfo(libPath, mangled)
-			if mErr != nil || mInfo == nil || len(mInfo.SupportedBackends) == 0 {
-				t.Fatalf("LoadModelInfo with mangled path %q failed: info=%+v err=%v", mangled, mInfo, mErr)
-			}
-		}
-	}
-
 	// Verify backend selection chooses GPU/NPU over CPU when supported by the model,
 	// and that NewEngine succeeds with the selected backend.
 	chosenBackend := "auto"
