@@ -121,7 +121,7 @@ func TestRunCLI_ExecutesAIToolDirectly(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	if code := runCLI(
-		[]string{"ai", "shell-state", "--explanation", "inspect the current shell"},
+		[]string{"ai", "shell-state"},
 		&stdout,
 		&stderr,
 		false,
@@ -150,7 +150,7 @@ func TestRunCLIPropagatesVerboseToDirectAITool(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	if code := runCLI(
-		[]string{"--verbose", "ai", "shell-state", "--explanation", "inspect the current shell"},
+		[]string{"--verbose", "ai", "shell-state"},
 		&stdout,
 		&stderr,
 		false,

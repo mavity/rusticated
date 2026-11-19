@@ -74,7 +74,6 @@ Owns the canonical data structures, wire serialization, session-level turn timin
        Text           string
        ImageBase64    string
        ToolName       string
-       Explanation    string
        ToolResponse   any
        ToolCalls      []ToolCall
        Embedding      []float32

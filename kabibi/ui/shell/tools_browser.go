@@ -231,7 +231,6 @@ type BrowserNavigateInput struct {
 	Back        bool     `json:"back,omitempty" doc:"If true, navigate back in tab history"`
 	Forward     bool     `json:"forward,omitempty" doc:"If true, navigate forward in tab history"`
 	Reload      bool     `json:"reload,omitempty" doc:"If true, reload the current page"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of this browser navigation"`
 }
 
 type BrowserAXInput struct {
@@ -239,7 +238,6 @@ type BrowserAXInput struct {
 	Nickname     string   `json:"nickname" doc:"Mandatory tab owner nickname"`
 	Search       string   `json:"search,omitempty" doc:"Optional search query to filter the AX tree (exact -> regex -> fuzzy -> semantic)"`
 	RootSelector string   `json:"root_selector,omitempty" doc:"Optional CSS selector scoping the root container"`
-	Explanation  string   `json:"explanation,omitempty" doc:"Brief explanation of what is being inspected"`
 }
 
 type BrowserClickInput struct {
@@ -247,7 +245,6 @@ type BrowserClickInput struct {
 	Nickname    string   `json:"nickname" doc:"Mandatory tab owner nickname"`
 	Target      string   `json:"target" doc:"Element caption (e.g. 'Sign in', 'button \"Add to cart\"', 'link \"Docs\"') or CSS selector"`
 	Button      string   `json:"button,omitempty" doc:"Mouse button: 'left' (default), 'right', 'middle', or 'double'"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this element is being clicked"`
 }
 
 type BrowserTypeInput struct {
@@ -257,7 +254,6 @@ type BrowserTypeInput struct {
 	Text        string   `json:"text" doc:"Text to type"`
 	ClearFirst  bool     `json:"clear_first,omitempty" doc:"If true, clear existing input value before typing"`
 	PressEnter  bool     `json:"press_enter,omitempty" doc:"If true, press Enter after typing"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of what is being typed"`
 }
 
 type BrowserScreenshotInput struct {
@@ -267,14 +263,12 @@ type BrowserScreenshotInput struct {
 	Target      string   `json:"target,omitempty" doc:"Optional element caption or CSS selector to clip screenshot to"`
 	FullPage    bool     `json:"full_page,omitempty" doc:"If true, capture the full scrollable page height"`
 	AdornChrome bool     `json:"adorn_chrome,omitempty" doc:"If true, render a realistic skeuomorphic rounded browser frame with drop shadow and address bar"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of the screenshot"`
 }
 
 type BrowserEvalInput struct {
 	_           struct{} `doc:"Evaluate a JavaScript expression in a nickname-owned browser tab (auto-awaiting Promises), wait for settling, and return the result along with the AX diff + network summary." emoji:"⚡"`
 	Nickname    string   `json:"nickname" doc:"Mandatory tab owner nickname"`
 	Expression  string   `json:"expression" doc:"JavaScript expression or IIFE to evaluate in the page"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this script is being evaluated"`
 }
 
 type BrowserCDPInput struct {
@@ -282,7 +276,6 @@ type BrowserCDPInput struct {
 	Nickname    string         `json:"nickname" doc:"Mandatory tab owner nickname"`
 	Method      string         `json:"method" doc:"CDP method name (e.g. 'Network.getCookies', 'Page.bringToFront', 'DOM.getDocument')"`
 	Params      map[string]any `json:"params,omitempty" doc:"Optional JSON object parameters for the CDP method"`
-	Explanation string         `json:"explanation,omitempty" doc:"Brief explanation of the raw CDP call"`
 }
 
 func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) {

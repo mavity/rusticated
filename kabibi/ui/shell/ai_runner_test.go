@@ -42,7 +42,7 @@ func TestKabibiMainToolsExposeOnlyHelper(t *testing.T) {
 	if err == nil || result != nil {
 		t.Fatalf("helper with empty description returned (%#v, %v), want an error", result, err)
 	}
-	if got, want := err.Error(), `helper received task is "inspect", description is empty, and explanation is missing.`; got != want {
+	if got, want := err.Error(), `helper received task is "inspect" and description is empty.`; got != want {
 		t.Fatalf("helper validation error = %q, want %q", got, want)
 	}
 }
@@ -56,7 +56,7 @@ func TestKabibiHelperValidationReportsEveryField(t *testing.T) {
 		{
 			name: "all missing",
 			args: map[string]any{},
-			want: "helper received task is missing, description is missing, and explanation is missing.",
+			want: "helper received task is missing and description is missing.",
 		},
 		{
 			name: "blank and missing",
@@ -64,14 +64,13 @@ func TestKabibiHelperValidationReportsEveryField(t *testing.T) {
 				"task":        "inspect",
 				"description": "",
 			},
-			want: `helper received task is "inspect", description is empty, and explanation is missing.`,
+			want: `helper received task is "inspect" and description is empty.`,
 		},
 		{
 			name: "all present",
 			args: map[string]any{
 				"task":        "inspect",
 				"description": "look closely",
-				"explanation": "find evidence",
 			},
 			want: "",
 		},
@@ -203,7 +202,6 @@ func TestKabibiHelperUsesSemanticContentSearchForConceptDiscovery(t *testing.T) 
 		Arguments: map[string]any{
 			"task":        "Find the browser runtime initialization",
 			"description": "task-specific discovery constraints",
-			"explanation": "locate the implementation",
 		},
 	})
 	if err != nil {
@@ -358,7 +356,7 @@ func TestAdaptiveEmbedderBackgroundBatchAndHelperUsesLiveReopenedEngine(t *testi
 		n := requests.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if n == 1 {
-			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"find_files\",\"arguments\":\"{\\\"find_paths\\\":\\\"*.txt\\\",\\\"explanation\\\":\\\"check files\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"))
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"find_files\",\"arguments\":\"{\\\"find_paths\\\":\\\"*.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"))
 			return
 		}
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"found files\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
@@ -447,7 +445,6 @@ func TestAdaptiveEmbedderBackgroundBatchAndHelperUsesLiveReopenedEngine(t *testi
 		Arguments: map[string]any{
 			"task":        "List txt files",
 			"description": "verify live reopened engine is used",
-			"explanation": "confirm the reopened engine is active",
 		},
 	})
 	if err != nil {

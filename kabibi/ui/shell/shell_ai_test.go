@@ -773,7 +773,7 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	writeTool := tools["write_file"]
 	_, err = writeTool.Execute(context.Background(), ai.ToolCall{
 		Name:         "write_file",
-		RawArguments: json.RawMessage(`{"path":"notes.txt","content":"line1\nline2\nline3","explanation":"create notes"}`),
+		RawArguments: json.RawMessage(`{"path":"notes.txt","content":"line1\nline2\nline3"}`),
 	}, nil)
 	if err != nil {
 		t.Fatalf("write_file failed: %v", err)
@@ -786,7 +786,7 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	readTool := tools["read_file"]
 	readOut, err := readTool.Execute(context.Background(), ai.ToolCall{
 		Name:         "read_file",
-		RawArguments: json.RawMessage(`{"path":"notes.txt","start_line":2,"end_line":3,"explanation":"read lines 2-3"}`),
+		RawArguments: json.RawMessage(`{"path":"notes.txt","start_line":2,"end_line":3}`),
 	}, nil)
 	if err != nil {
 		t.Fatalf("read_file failed: %v", err)
@@ -800,7 +800,7 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	histTool := tools["shell_history"]
 	histOut, err := histTool.Execute(context.Background(), ai.ToolCall{
 		Name:         "shell_history",
-		RawArguments: json.RawMessage(`{"since_last_ai_turn":true,"explanation":"check recent commands"}`),
+		RawArguments: json.RawMessage(`{"since_last_ai_turn":true}`),
 	}, nil)
 	if err != nil {
 		t.Fatalf("shell_history failed: %v", err)
@@ -824,7 +824,7 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	execTool := tools["exec"]
 	execOut, err := execTool.Execute(context.Background(), ai.ToolCall{
 		Name:         "exec",
-		RawArguments: json.RawMessage(`{"command":"cat notes.txt","explanation":"read notes via shell"}`),
+		RawArguments: json.RawMessage(`{"command":"cat notes.txt"}`),
 	}, nil)
 	if err != nil {
 		t.Fatalf("exec tool failed: %v", err)
@@ -840,7 +840,7 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	lastRec := allRecs[len(allRecs)-1]
 	rcOut, err := readCmdTool.Execute(context.Background(), ai.ToolCall{
 		Name:         "read_command_output",
-		RawArguments: json.RawMessage(`{"id":` + string(rune('0'+lastRec.ID)) + `,"start_line":2,"end_line":3,"explanation":"inspect lines 2-3 of command output"}`),
+		RawArguments: json.RawMessage(`{"id":` + string(rune('0'+lastRec.ID)) + `,"start_line":2,"end_line":3}`),
 	}, nil)
 	if err != nil {
 		t.Fatalf("read_command_output failed: %v", err)

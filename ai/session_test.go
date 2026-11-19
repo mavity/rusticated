@@ -315,19 +315,11 @@ func TestNewSessionCompilesDeterministicToolSchemas(t *testing.T) {
 		fn, _ := session.tools[i]["function"].(map[string]any)
 		params, _ := fn["parameters"].(map[string]any)
 		props, _ := params["properties"].(map[string]any)
-		explanation, _ := props["explanation"].(map[string]any)
-		if fn["name"] != want || explanation["type"] != "string" {
-			t.Fatalf("compiled %s schema missing explanation: %#v", want, session.tools[i])
+		if fn["name"] != want {
+			t.Fatalf("compiled tool name = %v, want %s", fn["name"], want)
 		}
-		required, _ := params["required"].([]string)
-		foundExplanation := false
-		for _, name := range required {
-			if name == "explanation" {
-				foundExplanation = true
-			}
-		}
-		if !foundExplanation {
-			t.Fatalf("%s required fields omit explanation: %v", want, required)
+		if _, present := props["explanation"]; present {
+			t.Fatalf("compiled %s schema unexpectedly contains explanation: %#v", want, session.tools[i])
 		}
 	}
 	if _, mutated := originalProperties["explanation"]; mutated {
@@ -640,13 +632,12 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 				{
 					Role: RoleModel,
 					ToolCalls: []ToolCall{
-						{Name: "read_file", RawArguments: []byte(`{"path":"app.conf","explanation":"find server port"}`)},
+						{Name: "read_file", RawArguments: []byte(`{"path":"app.conf"}`)},
 					},
 				},
 				{
 					Role:         RoleTool,
 					ToolName:     "read_file",
-					Explanation:  "find server port",
 					ToolResponse: map[string]any{"content": largeOutput},
 				},
 			},
@@ -656,7 +647,6 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 				{
 					Role:         RoleTool,
 					ToolName:     "read_file",
-					Explanation:  "keep pinned",
 					ToolResponse: map[string]any{"content": pinnedOutput},
 				},
 			},
@@ -666,9 +656,9 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 	pinned := map[int]bool{1: true}
 	s.collapseUnpinnedLargeBlocks(context.Background(), units, 2, pinned)
 
-	// 1. Unpinned unit[0] must be collapsed with "COMPACTED: " prefix and guided by explanation.
-	if len(prompts) != 1 || !strings.Contains(prompts[0], "find server port") {
-		t.Fatalf("expected 1 compressor call with explanation 'find server port', got %v", prompts)
+	// 1. Unpinned unit[0] must be collapsed with "COMPACTED: " prefix.
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 compressor call, got %v", prompts)
 	}
 	resp0, _ := units[0].parts[1].ToolResponse.(map[string]any)
 	gotOut, _ := resp0["output"].(string)
@@ -689,7 +679,6 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 				{
 					Role:         RoleTool,
 					ToolName:     "read_file",
-					Explanation:  "find server port",
 					ToolResponse: map[string]any{"content": largeOutput},
 				},
 			},
@@ -960,7 +949,7 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 				{ToolCallEvent{ToolCalls: []ToolCall{{
 					ID:           "call-read-file",
 					Name:         "read_file",
-					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
+					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `}`),
 				}}}},
 				{TextEvent{Text: "The bridge in the file is Pont Alexandre III."}},
 			},
@@ -1040,7 +1029,6 @@ func TestSessionToolCanReplaceSessionHistory(t *testing.T) {
 	type MemoryRecallInput struct {
 		_           struct{} `doc:"Resurface salient memories into session history." emoji:"🧲"`
 		Query       string   `json:"query" doc:"Memory search query"`
-		Explanation string   `json:"explanation" doc:"Why memory recall is needed"`
 	}
 
 	backend := &scriptedSessionBackend{
@@ -1049,7 +1037,7 @@ func TestSessionToolCanReplaceSessionHistory(t *testing.T) {
 				{ToolCallEvent{ToolCalls: []ToolCall{{
 					ID:           "recall-1",
 					Name:         "recall_memory",
-					RawArguments: json.RawMessage(`{"query":"secret bridge","explanation":"fetch bridge from memory"}`),
+					RawArguments: json.RawMessage(`{"query":"secret bridge"}`),
 				}}}},
 				{TextEvent{Text: "Pont Mirabeau"}},
 			},
@@ -1100,7 +1088,6 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	type ReadFileInput struct {
 		_           struct{} `doc:"Read a file."`
 		Path        string   `json:"path" doc:"File path"`
-		Explanation string   `json:"explanation" doc:"Purpose of reading the file"`
 	}
 
 	// Build a large 12,000-char payload with distinct HEAD, MIDDLE, and TAIL markers
@@ -1116,7 +1103,7 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 				{ToolCallEvent{ToolCalls: []ToolCall{{
 					ID:           "call_readme",
 					Name:         "read_file",
-					RawArguments: json.RawMessage(`{"path":"README.md","explanation":"extract architecture and vision for Ukrainian poem"}`),
+					RawArguments: json.RawMessage(`{"path":"README.md"}`),
 				}}}},
 				nil,
 				{TextEvent{Text: "Код звучить як пісня."}},
@@ -1162,15 +1149,15 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	if len(compressorSysPrompts) < 2 {
 		t.Fatalf("expected multiple overlapped middle chunks to be summarized, got %d chunks", len(compressorSysPrompts))
 	}
-	toolPurposePromptSeen := false
+	toolPromptSeen := false
 	for _, sp := range compressorSysPrompts {
-		if strings.Contains(sp, "extract architecture and vision for Ukrainian poem") {
-			toolPurposePromptSeen = true
+		if strings.Contains(sp, "tool \"read_file\"") {
+			toolPromptSeen = true
 			break
 		}
 	}
-	if !toolPurposePromptSeen {
-		t.Fatalf("tool-response compaction prompt omitted purpose: %#v", compressorSysPrompts)
+	if !toolPromptSeen {
+		t.Fatalf("tool-response compaction prompt omitted tool name: %#v", compressorSysPrompts)
 	}
 	// Verify adjacent chunks overlap
 	if len(compressorChunks) >= 2 {
@@ -1200,8 +1187,8 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	if !strings.Contains(midSummary, "condensed_part_1") || !strings.Contains(midSummary, "condensed_part_2") {
 		t.Fatalf("overlapped_middle_summary missing condensed parts: %q", midSummary)
 	}
-	if !strings.Contains(notice, "Compression was necessary") || !strings.Contains(notice, "extract architecture and vision for Ukrainian poem") {
-		t.Fatalf("notice missing compression explanation or purpose: %q", notice)
+	if !strings.Contains(notice, "Compression was necessary") || !strings.Contains(notice, "read_file") {
+		t.Fatalf("notice missing compression notice or tool name: %q", notice)
 	}
 }
 

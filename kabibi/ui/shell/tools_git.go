@@ -25,7 +25,6 @@ type GitInspectInput struct {
 	Hashline    *bool    `json:"hashline,omitempty" doc:"Include LINE:HASH| anchors in diff output (default true)"`
 	StartLine   int      `json:"start_line,omitempty" doc:"First 1-based line to return for blame"`
 	EndLine     int      `json:"end_line,omitempty" doc:"Last 1-based line to return for blame"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why the repository is being inspected"`
 }
 
 type GitMutateInput struct {
@@ -41,7 +40,6 @@ type GitMutateInput struct {
 	Force       bool     `json:"force,omitempty" doc:"Force deletion of an unmerged branch"`
 	Staged      bool     `json:"staged,omitempty" doc:"Restore the index rather than the worktree"`
 	Mode        string   `json:"mode,omitempty" doc:"Reset mode: soft, mixed (default), or hard"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why the repository is being changed"`
 }
 
 func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {

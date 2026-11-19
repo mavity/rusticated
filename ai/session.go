@@ -574,12 +574,6 @@ func compileToolParameters(tool Tool) map[string]any {
 		properties = propertiesCopy
 		parameters["properties"] = properties
 	}
-	if _, ok := properties["explanation"]; !ok {
-		properties["explanation"] = map[string]any{
-			"type":        "string",
-			"description": "Brief explanation of why this tool is being called and what specific information is sought.",
-		}
-	}
 	required := append([]string(nil), tool.Required...)
 	switch raw := parameters["required"].(type) {
 	case []string:
@@ -591,7 +585,7 @@ func compileToolParameters(tool Tool) map[string]any {
 			}
 		}
 	}
-	seen := make(map[string]bool, len(required)+len(tool.Required)+1)
+	seen := make(map[string]bool, len(required)+len(tool.Required))
 	for _, name := range required {
 		seen[name] = true
 	}
@@ -600,9 +594,6 @@ func compileToolParameters(tool Tool) map[string]any {
 			required = append(required, name)
 			seen[name] = true
 		}
-	}
-	if !seen["explanation"] {
-		required = append(required, "explanation")
 	}
 	parameters["required"] = required
 	return parameters
@@ -1435,7 +1426,6 @@ func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPar
 	toolResponses := make([]PromptPart, 0, len(calls))
 	sessionMutated := false
 	for _, call := range calls {
-		explanation := extractToolExplanation(call)
 		tc := &ToolContext{
 			Session:     s,
 			Feedback:    s.emitFeedback,
@@ -1457,7 +1447,6 @@ func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPar
 			Role:         RoleTool,
 			ToolName:     call.Name,
 			ToolCallID:   call.ID,
-			Explanation:  explanation,
 			ToolResponse: result,
 			StartedAt:    toolStart,
 			CompletedAt:  toolEnd,
@@ -1894,41 +1883,18 @@ func (s *Session) gapTokenBudget() int {
 	return 2048
 }
 
-func extractToolExplanation(call ToolCall) string {
-	for _, key := range []string{"explanation", "purpose", "reason", "note"} {
-		if call.Arguments != nil {
-			if exp, ok := call.Arguments[key].(string); ok && strings.TrimSpace(exp) != "" {
-				return strings.TrimSpace(exp)
-			}
-		}
-		if len(call.RawArguments) > 0 {
-			var m map[string]any
-			if json.Unmarshal(call.RawArguments, &m) == nil {
-				if exp, ok := m[key].(string); ok && strings.TrimSpace(exp) != "" {
-					return strings.TrimSpace(exp)
-				}
-			}
-		}
-	}
-	return ""
-}
-
 // compressImmediateToolOverflow compresses an oversized immediate tool output
 // that exceeded the context window during tool execution. It:
 //  1. Retains a short verbatim head and tail of the raw tool output,
 //  2. Breaks the middle into overlapped consumable chunks,
 //  3. Summarizes each chunk via a dedicated LLM call adorned with an aggressive
-//     summarization prompt that includes the tool call's purpose/explanation note,
+//     summarization prompt that identifies the tool producing the output,
 //  4. Tells the agent explicitly that compression was necessary because the tool
 //     output size was too large for the context window.
 func (s *Session) compressImmediateToolOverflow(ctx context.Context, part PromptPart, rawJSON string) map[string]any {
-	purpose := strings.TrimSpace(part.Explanation)
-	if purpose == "" {
-		if part.ToolName != "" {
-			purpose = "inspecting output of tool " + part.ToolName
-		} else {
-			purpose = "answering the user's request"
-		}
+	purpose := "inspecting output"
+	if part.ToolName != "" {
+		purpose = "inspecting output of tool " + part.ToolName
 	}
 
 	runes := []rune(rawJSON)
@@ -2077,29 +2043,25 @@ func (s *Session) largeBlockByteThreshold() int {
 	return thresh
 }
 
-func artifactCacheKey(role Role, toolName, explanation, rawContent string) string {
-	sum := sha256.Sum256([]byte(string(role) + "\x00" + toolName + "\x00" + explanation + "\x00" + rawContent))
+func artifactCacheKey(role Role, toolName, rawContent string) string {
+	sum := sha256.Sum256([]byte(string(role) + "\x00" + toolName + "\x00" + rawContent))
 	return hex.EncodeToString(sum[:])
 }
 
 // compressLargeBlock collapses a single large unpinned block into a <=20-word gist
-// guided by explanation, using artifactCache to avoid redundant LLM calls across turns.
-func (s *Session) compressLargeBlock(ctx context.Context, role Role, toolName, explanation, rawContent string) string {
+// using artifactCache to avoid redundant LLM calls across turns.
+func (s *Session) compressLargeBlock(ctx context.Context, role Role, toolName, rawContent string) string {
 	if s.artifactCache == nil {
 		s.artifactCache = make(map[string]string)
 	}
-	key := artifactCacheKey(role, toolName, explanation, rawContent)
+	key := artifactCacheKey(role, toolName, rawContent)
 	if cached, ok := s.artifactCache[key]; ok {
 		return cached
 	}
 
-	intent := strings.TrimSpace(explanation)
-	if intent == "" {
-		if toolName != "" {
-			intent = "tool execution of " + toolName
-		} else {
-			intent = "key facts and decisions"
-		}
+	intent := "key facts and decisions"
+	if toolName != "" {
+		intent = "tool execution of " + toolName
 	}
 
 	inputText := strings.TrimSpace(rawContent)
@@ -2156,33 +2118,21 @@ func (s *Session) collapseUnpinnedLargeBlocks(ctx context.Context, units []atomi
 		if pinned[i] {
 			continue
 		}
-		var callExplanations []string
-		for _, p := range units[i].parts {
-			for _, tc := range p.ToolCalls {
-				callExplanations = append(callExplanations, extractToolExplanation(tc))
-			}
-		}
-		expIdx := 0
 		parts := make([]PromptPart, len(units[i].parts))
 		copy(parts, units[i].parts)
 		for j := range parts {
 			p := &parts[j]
 			if p.Role == RoleTool {
-				exp := p.Explanation
-				if exp == "" && expIdx < len(callExplanations) {
-					exp = callExplanations[expIdx]
-				}
-				expIdx++
 				if p.ToolResponse != nil {
 					if b, err := json.Marshal(p.ToolResponse); err == nil && len(b) > thresh {
-						compacted := s.compressLargeBlock(ctx, p.Role, p.ToolName, exp, string(b))
+						compacted := s.compressLargeBlock(ctx, p.Role, p.ToolName, string(b))
 						p.ToolResponse = map[string]any{"output": compacted}
 					}
 				} else if len(p.Text) > thresh {
-					p.Text = s.compressLargeBlock(ctx, p.Role, p.ToolName, exp, p.Text)
+					p.Text = s.compressLargeBlock(ctx, p.Role, p.ToolName, p.Text)
 				}
 			} else if len(p.Text) > thresh {
-				p.Text = s.compressLargeBlock(ctx, p.Role, "", p.Explanation, p.Text)
+				p.Text = s.compressLargeBlock(ctx, p.Role, "", p.Text)
 			}
 		}
 		units[i].parts = parts
@@ -2297,7 +2247,7 @@ func (s *Session) projectHistory(ctx context.Context, prior []PromptPart) []Prom
 	}
 
 	// Pre-main-compaction step: collapse all large blocks outside of pinned units
-	// into their cached `COMPACTED: ...` gist guided by tool explanation.
+	// into their cached `COMPACTED: ...` gist.
 	s.collapseUnpinnedLargeBlocks(ctx, units, tailStart, pinned)
 
 	var projected []PromptPart
@@ -2371,7 +2321,7 @@ func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, 
 	for i := range pending {
 		if pending[i].Role == RoleTool && pending[i].ToolResponse != nil {
 			if b, err := json.Marshal(pending[i].ToolResponse); err == nil && len(b) > 8192 {
-				compacted := s.compressLargeBlock(ctx, pending[i].Role, pending[i].ToolName, pending[i].Explanation, string(b))
+				compacted := s.compressLargeBlock(ctx, pending[i].Role, pending[i].ToolName, string(b))
 				pending[i].ToolResponse = map[string]any{"output": compacted}
 			}
 		}

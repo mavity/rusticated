@@ -369,7 +369,7 @@ func TestAIBuiltinMiddlewareRendersForAttachedTTY(t *testing.T) {
 
 	record, err := execSess.RunCommand(
 		context.Background(),
-		`ai shell-state --explanation "inspect current state"`,
+		`ai shell-state`,
 		nil,
 		SourceUserShell,
 		nil,
@@ -398,7 +398,7 @@ func TestRunAIBuiltinToolRendersMarkdownForTTY(t *testing.T) {
 		context.Background(),
 		execSess,
 		"shell-state",
-		[]string{"--explanation", "check current state"},
+		nil,
 		&stdout,
 		&stderr,
 		newCommandTerminal(context.Background(), 80, 20),

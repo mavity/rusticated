@@ -14,7 +14,6 @@ type ShellHistoryInput struct {
 	SinceLastAITurn bool     `json:"since_last_ai_turn,omitempty" doc:"If true, only return shell commands executed since the previous AI turn"`
 	Count           int      `json:"count,omitempty" doc:"Maximum number of recent command records to return (default 10)"`
 	IncludeOutput   *bool    `json:"include_output,omitempty" doc:"Whether to include captured stdout/stderr for each command (default true)"`
-	Explanation     string   `json:"explanation" doc:"Brief explanation of why shell history is being inspected"`
 }
 
 type ReadCommandOutputInput struct {
@@ -23,13 +22,11 @@ type ReadCommandOutputInput struct {
 	StartLine   int      `json:"start_line,omitempty" doc:"Optional 1-based start line (inclusive)"`
 	EndLine     int      `json:"end_line,omitempty" doc:"Optional 1-based end line (inclusive)"`
 	Search      string   `json:"search,omitempty" doc:"Optional substring filter to return only matching lines with 1-based line numbers"`
-	Explanation string   `json:"explanation" doc:"Brief explanation of why this command output is being inspected"`
 }
 
 type ShellStateInput struct {
 	_           struct{} `doc:"Inspect Kabibi's current shell working directory, platform OS, last command status, and optional environment variables." emoji:"🧭"`
 	EnvKeys     []string `json:"env_keys,omitempty" doc:"Optional list of environment variable names to inspect"`
-	Explanation string   `json:"explanation" doc:"Brief explanation of why shell state is being inspected"`
 }
 
 func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSession) {

@@ -84,7 +84,6 @@ To keep existing tools ergonomic while exposing `ToolContext` cleanly:
 * **Description:** `"Deliberate on a complex task before acting: calibrates expected response detail, breaks down initial steps, critiques relevancy/safety/groundedness, and synthesizes a concrete execution plan. Call this tool FIRST whenever a request requires multi-step problem solving, codebase inspection, or tool orchestration."`
 * **Parameters:**
   - `goal` (`string`, required): `"One-sentence description of the underlying goal and task required to address the user's request."`
-  - `explanation` (`string`, required — auto-injected): `"Brief explanation of why deliberation is needed."`
 * **Execution Flow Inside `deliberate`:**
   1. Captures the extracted goal.
   3. Creates a `Tools: nil` contemplation conversation on `tc.Engine` seeded with `baseHistory + User(userText)`, and uses `Conversation.Clone()` (`litert_lm_conversation_clone`) to fork each branch without re-prefilling `baseHistory`:

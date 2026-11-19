@@ -130,21 +130,7 @@ map[string]any{
 
 
 
-2. **Automatic `"explanation"` Property Injection:**
-* When building `compiledParams`, automatically inject the `"explanation"` property into `"properties"` if not already present:
-```go
-"explanation": map[string]any{
-    "type":        "string",
-    "description": "Brief explanation of why this tool is being called and what specific information is sought.",
-}
-
-```
-
-
-* Ensure `"explanation"` is included in the `"required"` slice so the model always supplies intent for directional tool-output compaction and live feedback.
-
-
-3. **Built-In Dispatch (`Execute`):**
+2. **Built-In Dispatch (`Execute`):**
 * During Stage 6 (`runStage5Execution`), look up `tool, ok := s.toolRegistry[call.Name]`.
 * If found, invoke `tool.Execute(ctx, call, s.emitFeedback)` followed by `s.emitFeedback("\n")`.
 * If not found, return `map[string]any{"error": "unknown tool: " + call.Name}` so the model can recover cleanly.

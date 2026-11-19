@@ -15,7 +15,6 @@ type ExecInput struct {
 	Command     string   `json:"command" doc:"The shell command line to execute inside Kabibi's shell"`
 	TimeoutSec  int      `json:"timeout_sec,omitempty" doc:"Seconds to wait before promoting to background PTY (default 15)"`
 	KeepANSI    bool     `json:"keep_ansi,omitempty" doc:"If true, preserve bold/underline attributes while stripping colors (default false)"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this command is being run"`
 }
 
 type TermReadInput struct {

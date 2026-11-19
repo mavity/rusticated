@@ -27,21 +27,18 @@ type ReadFileInput struct {
 	Search      string   `json:"search,omitempty" doc:"Filter file to blocks matching query. Tries exact -> regex -> fuzzy -> semantic embeddings."`
 	SearchMode  string   `json:"search_mode,omitempty" doc:"Search mode: 'auto', 'plain', 'regex', or 'semantic' (default 'auto')"`
 	Hashline    *bool    `json:"hashline,omitempty" doc:"Prefix lines with LINE:HASH| (e.g. '42:a3|code') and file header [path#TAG] for safe editing with edit_file. Default true."`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this file is being read"`
 }
 
 type EditFileInput struct {
 	_           struct{}          `doc:"Apply atomic, anchor-verified hashline edits (replace, insert_after, insert_before, delete) to a file with ±30-line auto-relocation." emoji:"✏️"`
 	Path        string            `json:"path" doc:"File path (may include #TAG from read_file, e.g. 'main.go#8f2a')"`
 	Edits       []hashline.EditOp `json:"edits" doc:"List of hashline edit operations applied atomically"`
-	Explanation string            `json:"explanation,omitempty" doc:"Brief explanation of the edit"`
 }
 
 type WriteFileInput struct {
 	_           struct{} `doc:"Write or overwrite a file resolved relative to Kabibi's current shell working directory." emoji:"📝"`
 	Path        string   `json:"path" doc:"File path to write (relative to current shell cwd or absolute)"`
 	Content     string   `json:"content" doc:"The text content to write to the file"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this file is being written"`
 }
 
 type FindFilesInput struct {
@@ -51,13 +48,11 @@ type FindFilesInput struct {
 	FindContent string   `json:"find_content,omitempty" doc:"Literal text or natural-language concept to search inside file contents (e.g. 'AI browser tool', 'authentication flow'). Semantic search is on by default whenever this is set."`
 	NoSemantic  bool     `json:"no_semantic,omitempty" doc:"Disable semantic embeddings; only literal content matching is used. Default false. Has no effect without find_content."`
 	MaxResults  int      `json:"max_results,omitempty" doc:"Maximum entries to return (default 50)."`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of what is being searched."`
 }
 
 type ListDirInput struct {
 	_           struct{} `doc:"List files and directories at a path resolved relative to Kabibi's current shell working directory." emoji:"📂"`
 	Path        string   `json:"path,omitempty" doc:"Directory path to list (defaults to current shell working directory '.')"`
-	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this directory is being listed"`
 }
 
 func findFilesOptions(ctx context.Context, in FindFilesInput, embedder ai.PartEmbedder) filelist.Options {
