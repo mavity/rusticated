@@ -132,9 +132,9 @@ func TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths(t *testing.T) {
 
 	variants := []string{
 		absDLL,
-		`\` + absDLL,                                           // \C:\Windows\System32\kernel32.dll
-		`/` + strings.ReplaceAll(absDLL, `\`, `/`),             // /C:/Windows/System32/kernel32.dll
-		`\` + strings.ReplaceAll(absDLL, `\`, `/`),             // \C:/Windows/System32/kernel32.dll
+		`\` + absDLL, // \C:\Windows\System32\kernel32.dll
+		`/` + strings.ReplaceAll(absDLL, `\`, `/`), // /C:/Windows/System32/kernel32.dll
+		`\` + strings.ReplaceAll(absDLL, `\`, `/`), // \C:/Windows/System32/kernel32.dll
 	}
 	for _, v := range variants {
 		t.Run(v, func(t *testing.T) {
