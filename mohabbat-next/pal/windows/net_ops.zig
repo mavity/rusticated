@@ -236,6 +236,41 @@ pub fn netAccept(s: *PalState, ov: *pal_abi.Overlapped, listener: u64) void {
     mem.completeInline(ov, pal_abi.ERROR_IO, 0, 0);
 }
 
+const NetLookupAddress = struct {
+    family: u8,
+    bytes: []const u8,
+};
+
+fn netLookupAddress(ai: *AddrInfoA) ?NetLookupAddress {
+    if (ai.addr) |addr| {
+        if (ai.family == 2 and ai.addrlen >= 8) {
+            return .{ .family = 4, .bytes = addr[4..8] };
+        }
+        if (ai.family == 23 and ai.addrlen >= 24) {
+            return .{ .family = 6, .bytes = addr[8..24] };
+        }
+    }
+    return null;
+}
+
+fn writeNetLookupBytes(out: []u8, offset: usize, bytes: []const u8) void {
+    if (offset >= out.len) return;
+    const count = @min(bytes.len, out.len - offset);
+    @memcpy(out[offset..][0..count], bytes[0..count]);
+}
+
+fn writeNetLookupU32(out: []u8, offset: usize, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    writeNetLookupBytes(out, offset, &bytes);
+}
+
+fn writeNetLookupEntry(out: []u8, index: usize, data_offset: usize, entry: NetLookupAddress) void {
+    const family_offset = 8 + index;
+    if (family_offset < out.len) out[family_offset] = entry.family;
+    writeNetLookupBytes(out, data_offset, entry.bytes);
+}
+
 pub fn netLookup(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, len: usize, out: [*]u8, cap: usize) void {
     if (!ensureWsa(s)) {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
@@ -269,22 +304,43 @@ pub fn netLookup(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, len: 
     }
     defer fai(res.?);
 
-    var written: usize = 0;
+    var count: usize = 0;
+    var data_len: usize = 0;
     var cur = res;
     while (cur) |ai| : (cur = ai.next) {
-        if (ai.family == 2 and ai.addrlen >= 8 and ai.addr != null) { // AF_INET
-            if (written + 5 > cap) break;
-            out[written] = 4;
-            @memcpy(out[written + 1 ..][0..4], ai.addr.?[4..8]);
-            written += 5;
-        } else if (ai.family == 23 and ai.addrlen >= 24 and ai.addr != null) { // AF_INET6
-            if (written + 17 > cap) break;
-            out[written] = 16;
-            @memcpy(out[written + 1 ..][0..16], ai.addr.?[8..24]);
-            written += 17;
+        if (netLookupAddress(ai)) |entry| {
+            if (count == std.math.maxInt(usize) or data_len > std.math.maxInt(usize) - entry.bytes.len) {
+                mem.completeInline(ov, pal_abi.ERROR_OVERFLOW, 0, 0);
+                return;
+            }
+            count += 1;
+            data_len += entry.bytes.len;
         }
     }
-    mem.completeInline(ov, 0, 0, written);
+    if (count == 0) {
+        mem.completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+        return;
+    }
+    const total_size = 8 + count + data_len;
+    if (total_size > @as(usize, std.math.maxInt(u32))) {
+        mem.completeInline(ov, pal_abi.ERROR_OVERFLOW, 0, 0);
+        return;
+    }
+
+    const out_slice = out[0..cap];
+    writeNetLookupU32(out_slice, 0, @intCast(total_size));
+    writeNetLookupU32(out_slice, 4, @intCast(count));
+    var index: usize = 0;
+    var data_offset = 8 + count;
+    cur = res;
+    while (cur) |ai| : (cur = ai.next) {
+        if (netLookupAddress(ai)) |entry| {
+            writeNetLookupEntry(out_slice, index, data_offset, entry);
+            index += 1;
+            data_offset += entry.bytes.len;
+        }
+    }
+    mem.completeInline(ov, 0, 0, total_size);
 }
 
 const CertChainPara = extern struct {
@@ -430,4 +486,31 @@ pub fn netCertVerify(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, n
         return;
     }
     mem.completeInline(ov, 0, 0, if (status.dw_error == 0) 1 else 0);
+}
+
+test "Windows net lookup matches the shared ABI wire format" {
+    const ipv4 = [_]u8{ 127, 0, 0, 1 };
+    const ipv6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    var actual: [30]u8 = @splat(0);
+    writeNetLookupU32(&actual, 0, @intCast(actual.len));
+    writeNetLookupU32(&actual, 4, 2);
+    writeNetLookupEntry(&actual, 0, 10, .{ .family = 4, .bytes = &ipv4 });
+    writeNetLookupEntry(&actual, 1, 14, .{ .family = 6, .bytes = &ipv6 });
+
+    const expected = [_]u8{
+        30, 0, 0, 0, 2, 0, 0, 0, 4, 6,
+        127, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "Windows net lookup writes only the available prefix" {
+    var actual: [12]u8 = @splat(0);
+    writeNetLookupU32(&actual, 0, 30);
+    writeNetLookupU32(&actual, 4, 2);
+    writeNetLookupEntry(&actual, 0, 10, .{ .family = 4, .bytes = &.{ 127, 0, 0, 1 } });
+
+    const expected = [_]u8{ 30, 0, 0, 0, 2, 0, 0, 0, 4, 0, 127, 0 };
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
 }

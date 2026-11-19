@@ -552,6 +552,7 @@ func zigTestArgs(root string, source zigTestSource) []string {
 
 var zigTestSources = []zigTestSource{
 	{Path: "mohabbat-next/pal/abi/guest.zig"},
+	{Path: "mohabbat-next/pal/windows/net_ops.zig", NativeGOOS: "windows"},
 	{Path: "mohabbat-next/pal/windows/platform.zig", NativeGOOS: "windows", UsesPalABI: true},
 	{Path: "mohabbat-next/pal/unix/platform_linux.zig", NativeGOOS: "linux", UsesPalABI: true},
 	{Path: "mohabbat-next/runtime/src/pal_bridge.zig"},

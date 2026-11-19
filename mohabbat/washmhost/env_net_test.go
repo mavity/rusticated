@@ -21,6 +21,7 @@ func TestSysNet(t *testing.T) {
 			if !ok {
 				t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
 			}
+
 			if binary.LittleEndian.Uint32(header) == 1 {
 				result, ok := mod.Memory().Read(ovPtr, 24)
 				if !ok {
@@ -464,3 +465,4 @@ func TestSysNet(t *testing.T) {
 		}
 	})
 }
+
