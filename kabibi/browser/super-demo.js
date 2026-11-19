@@ -2,7 +2,7 @@
   'use strict';
 
   const VIRTUAL_KEYS = [
-    { label: 'Esc', ariaLabel: 'Escape', sequence: '\x1b', caption: 'Panel', captionColor: 'cyan' },
+    { label: 'Esc', ariaLabel: 'Escape', sequence: '\x1b', caption: 'Panel', captionColor: 'cyan', groupStart: true },
     { label: 'Tab', ariaLabel: 'Tab', sequence: '\t', caption: '⇥' },
     { label: 'F1', ariaLabel: 'F1', sequence: '\x1bOP', groupStart: true },
     { label: 'F2', ariaLabel: 'F2', sequence: '\x1bOQ', caption: 'Rename', captionColor: 'cyan' },
@@ -210,19 +210,27 @@
         pointer-events: none;
       }
       .kabibi-keyboard-grid {
-        display: grid;
-        grid-template-columns: 1.55fr repeat(18, minmax(0, 1fr));
-        gap: clamp(2px, 0.42cqw, 7px);
+        display: flex;
+        align-items: stretch;
+        gap: clamp(1px, 0.2cqw, 3px);
         width: 100%;
       }
-      .kabibi-keyboard--narrow .kabibi-keyboard-grid {
-        grid-template-columns: 1.55fr repeat(9, minmax(0, 1fr));
+      .kabibi-keyboard-row {
+        display: contents;
       }
-      .kabibi-keyboard--narrow .kabibi-key--row-start {
-        grid-column-start: 1;
+      .kabibi-keyboard--narrow .kabibi-keyboard-grid {
+        flex-direction: column;
+        gap: clamp(3px, 0.6cqw, 6px);
+      }
+      .kabibi-keyboard--narrow .kabibi-keyboard-row {
+        display: flex;
+        align-items: stretch;
+        gap: clamp(1px, 0.2cqw, 3px);
+        width: 100%;
       }
       .kabibi-key {
         position: relative;
+        flex: 1 1 0%;
         box-sizing: border-box;
         min-width: 0;
         height: clamp(2.25rem, 6dvh, 3.5rem);
@@ -364,19 +372,11 @@
       .kabibi-key-caption--amber { color: #fcd34d; }
       .kabibi-key-caption--red { color: #fda4af; }
       .kabibi-key-caption--muted { color: #94a3b8; }
-      .kabibi-key--group-start::after {
-        position: absolute;
-        z-index: 2;
-        top: 18%;
-        bottom: 24%;
-        left: 0;
-        width: 1px;
-        background: rgba(190,210,232,.28);
-        box-shadow: 1px 0 0 rgba(0,0,0,.55);
-        content: '';
-        pointer-events: none;
+      .kabibi-key--group-start {
+        margin-left: clamp(4px, 0.65cqw, 10px);
       }
       .kabibi-key--ctrl {
+        flex: 1.55 1 0%;
         color: #98a2aa;
         letter-spacing: .03em;
       }
@@ -443,7 +443,10 @@
           padding: clamp(4px, 0.8vw, 10px) max(6px, env(safe-area-inset-right))
             max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
         }
-        .kabibi-keyboard-grid { gap: clamp(2px, 0.42vw, 7px); }
+        .kabibi-keyboard-grid,
+        .kabibi-keyboard--narrow .kabibi-keyboard-row { gap: clamp(1px, 0.2vw, 3px); }
+        .kabibi-keyboard--narrow .kabibi-keyboard-grid { gap: clamp(3px, 0.6vw, 6px); }
+        .kabibi-key--group-start { margin-left: clamp(4px, 0.65vw, 10px); }
         .kabibi-key {
           font-size: clamp(.62rem, 1.35vw, .95rem);
         }
@@ -459,6 +462,12 @@
     controls.setAttribute('aria-label', 'Kabibi screen keyboard');
     const grid = document.createElement('div');
     grid.className = 'kabibi-keyboard-grid';
+    const primaryRow = document.createElement('div');
+    primaryRow.className = 'kabibi-keyboard-row';
+    const secondaryRow = document.createElement('div');
+    secondaryRow.className = 'kabibi-keyboard-row';
+    grid.appendChild(primaryRow);
+    grid.appendChild(secondaryRow);
     controls.appendChild(grid);
     const createSkirtCaption = (text, color) => {
       const skirt = document.createElement('span');
@@ -509,9 +518,15 @@
       controlActive = !controlActive;
       controlButton.setAttribute('aria-pressed', String(controlActive));
     });
-    grid.appendChild(controlButton);
+    primaryRow.appendChild(controlButton);
+    const physicalButtons = new Map([[controlButton.dataset.key, controlButton]]);
+    let activeRow = primaryRow;
+    let keyIndex = 1;
 
     for (const key of VIRTUAL_KEYS) {
+      if (key.narrowRowStart) {
+        activeRow = secondaryRow;
+      }
       const button = document.createElement('button');
       button.type = 'button';
       button.className = [
@@ -521,7 +536,8 @@
         key.narrowRowStart ? 'kabibi-key--row-start' : ''
       ].filter(Boolean).join(' ');
       button.dataset.key = key.label;
-      setDeckProjection(button, grid.children.length);
+      setDeckProjection(button, keyIndex);
+      keyIndex += 1;
       button.appendChild(createKeyCapSvg(document, false));
       button.setAttribute('aria-label', key.ariaLabel);
       button.title = key.ariaLabel;
@@ -551,12 +567,12 @@
         }
         terminal.input(sequence, true);
       });
-      grid.appendChild(button);
+      activeRow.appendChild(button);
+      physicalButtons.set(button.dataset.key, button);
     }
 
     root.appendChild(style);
     root.appendChild(controls);
-    const physicalButtons = new Map(Array.from(grid.children, (button) => [button.dataset.key, button]));
     const physicalKeyLabels = {
       Escape: 'Esc',
       Control: 'Ctrl',

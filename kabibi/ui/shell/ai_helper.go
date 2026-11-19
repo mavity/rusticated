@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +14,63 @@ type helperInput struct {
 	_           struct{} `doc:"Service for access to files, running commands and other computer tasks. Always give helper a specific task and constraints."`
 	Task        string   `json:"task" doc:"Be specific and literal, what do you actually need done?"`
 	Description string   `json:"description" doc:"Detailed requirements, constraints, and context for the AI helper, describing why and how you want the task done."`
+	Explanation string   `json:"explanation" doc:"Brief explanation of why this tool is being called and what specific information is sought."`
+	present     map[string]bool
+}
+
+func (in *helperInput) UnmarshalJSON(data []byte) error {
+	type plainHelperInput helperInput
+	var decoded plainHelperInput
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*in = helperInput(decoded)
+	in.present = make(map[string]bool, len(fields))
+	for field := range fields {
+		in.present[field] = true
+	}
+	return nil
+}
+
+func helperFieldStatus(in helperInput, name, value string) string {
+	if !in.present[name] {
+		return name + " is missing"
+	}
+	if strings.TrimSpace(value) == "" {
+		return name + " is empty"
+	}
+	return fmt.Sprintf("%s is %q", name, value)
+}
+
+func helperInputValidationError(in helperInput) error {
+	statuses := []string{
+		helperFieldStatus(in, "task", in.Task),
+		helperFieldStatus(in, "description", in.Description),
+		helperFieldStatus(in, "explanation", in.Explanation),
+	}
+	if strings.TrimSpace(in.Task) != "" &&
+		strings.TrimSpace(in.Description) != "" &&
+		strings.TrimSpace(in.Explanation) != "" {
+		return nil
+	}
+	return fmt.Errorf("helper received %s", joinNatural(statuses))
+}
+
+func joinNatural(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0] + "."
+	case 2:
+		return items[0] + " and " + items[1] + "."
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1] + "."
+	}
 }
 
 const defaultKabibiHelperSystemPrompt = `You are meticulous and thorough helper. Use any tools necessary to carry out the task effectively.
@@ -63,11 +121,8 @@ func newKabibiHelperTool(
 	onFeedback ai.LogFeedback,
 ) ai.Tool {
 	return ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in helperInput) (any, error) {
-		if strings.TrimSpace(in.Task) == "" {
-			return nil, errors.New("helper task is required")
-		}
-		if strings.TrimSpace(in.Description) == "" {
-			return nil, errors.New("helper description is required")
+		if err := helperInputValidationError(in); err != nil {
+			return nil, err
 		}
 		var engine *ai.Engine
 		if tc != nil && tc.Session != nil {

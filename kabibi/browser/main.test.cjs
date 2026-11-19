@@ -904,7 +904,7 @@ test('super-demo Ctrl toggle modifies physical keys through the terminal handler
     mode: 'super-demo'
   });
   const controls = mounted.root.children.find((child) => child.className === 'kabibi-keyboard');
-  const ctrl = controls.children[0].children[0];
+  const ctrl = controls.children[0].children[0].children[0];
   const ctrlDish = ctrl.children.find((child) => /kabibi-key-dish/.test(child.className));
   assert.equal(ctrlDish.children[0].src, document.iconLink.href);
   ctrl.click();
@@ -1075,18 +1075,21 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   const keyboard = context.KabibiBrowserSuperDemo.createVirtualKeyboard(document, terminal, root);
   const style = root.children.find((child) => child.tagName === 'STYLE');
   const grid = root.children.find((child) => child.className === 'kabibi-keyboard').children[0];
-  const buttons = new Map(grid.children.map((button) => [button.dataset.key, button]));
+  const allButtons = grid.children.flatMap((row) => row.children);
+  const buttons = new Map(allButtons.map((button) => [button.dataset.key, button]));
 
-  assert.equal(grid.children.length, 19);
-  const narrowRowStart = Array.from(buttons.keys()).indexOf('F7');
-  assert.equal(narrowRowStart, 9);
-  assert.equal(buttons.size - narrowRowStart, 10);
-  assert.match(style.textContent, /1\.55fr repeat\(18, minmax\(0, 1fr\)\)/);
-  assert.match(style.textContent, /1\.55fr repeat\(9, minmax\(0, 1fr\)\)/);
-  assert.match(style.textContent, /kabibi-keyboard--narrow \.kabibi-key--row-start\s*\{\s*grid-column-start: 1;/);
+  assert.equal(grid.children.length, 2);
+  assert.equal(grid.children[0].children.length, 9);
+  assert.equal(grid.children[1].children.length, 10);
+  assert.equal(grid.children[1].children[0].dataset.key, 'F7');
+  assert.match(style.textContent, /\.kabibi-keyboard-row\s*\{\s*display: contents;/);
+  assert.match(style.textContent, /\.kabibi-keyboard--narrow \.kabibi-keyboard-row\s*\{\s*display: flex;/);
+  assert.match(style.textContent, /\.kabibi-key--ctrl\s*\{[^}]*flex: 1\.55 1 0%;/);
+  assert.match(style.textContent, /\.kabibi-key--group-start\s*\{\s*margin-left:/);
+  assert.doesNotMatch(style.textContent, /\.kabibi-key--group-start::after/);
   assert.match(style.textContent, /\.facet-wall-left\s*\{\s*fill: var\(--key-facet-left\)/);
   assert.match(style.textContent, /perspective\(240px\)\s*rotateX\(38deg\)/);
-  for (const button of grid.children) {
+  for (const button of allButtons) {
     assert.ok(button.children.some((child) => child.className === 'kabibi-key-svg'));
     assert.ok(button.children.some((child) => /kabibi-key-dish/.test(child.className)));
   }
@@ -1099,7 +1102,7 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   assert.match(buttons.get('F7').className, /kabibi-key--row-start/);
   assert.equal(buttons.get('Ctrl').style['--deck-skew'], '9.00deg');
   assert.equal(buttons.get('→').style['--deck-skew'], '-9.00deg');
-  for (const key of ['F1', 'F5', 'F9', '←']) {
+  for (const key of ['Esc', 'F1', 'F5', 'F9', '←']) {
     assert.match(buttons.get(key).className, /kabibi-key--group-start/);
   }
   const captions = new Map(Array.from(buttons, ([key, button]) => {
@@ -1153,7 +1156,7 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   }
   assert.deepEqual(terminal.inputs, expected);
 
-  const controlButton = grid.children[0];
+  const controlButton = allButtons[0];
   const controlDish = controlButton.children.find((child) => /kabibi-key-dish/.test(child.className));
   assert.equal(controlButton.getAttribute('aria-label'), 'Ctrl');
   assert.equal(controlDish.children[0].src, 'kabibi/kabibi.svg');
@@ -1222,7 +1225,9 @@ test('physical screen keys depress without adding input and release on keyup or 
   const keyboard = context.KabibiBrowserSuperDemo.createVirtualKeyboard(
     document, terminal, document.createElement('div')
   );
-  const buttons = new Map(keyboard.element.children[0].children.map(button => [button.dataset.key, button]));
+  const buttons = new Map(
+    keyboard.element.children[0].children.flatMap((row) => row.children).map((button) => [button.dataset.key, button])
+  );
   const keydown = (key, code = key) => keyboard.handleKeyEvent({
     type: 'keydown', key, code, preventDefault() {}
   });

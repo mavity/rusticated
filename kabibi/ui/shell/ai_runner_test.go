@@ -42,6 +42,59 @@ func TestKabibiMainToolsExposeOnlyHelper(t *testing.T) {
 	if err == nil || result != nil {
 		t.Fatalf("helper with empty description returned (%#v, %v), want an error", result, err)
 	}
+	if got, want := err.Error(), `helper received task is "inspect", description is empty, and explanation is missing.`; got != want {
+		t.Fatalf("helper validation error = %q, want %q", got, want)
+	}
+}
+
+func TestKabibiHelperValidationReportsEveryField(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{
+			name: "all missing",
+			args: map[string]any{},
+			want: "helper received task is missing, description is missing, and explanation is missing.",
+		},
+		{
+			name: "blank and missing",
+			args: map[string]any{
+				"task":        "inspect",
+				"description": "",
+			},
+			want: `helper received task is "inspect", description is empty, and explanation is missing.`,
+		},
+		{
+			name: "all present",
+			args: map[string]any{
+				"task":        "inspect",
+				"description": "look closely",
+				"explanation": "find evidence",
+			},
+			want: "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			helper := newKabibiHelperTool(nil, nil, 0, false, nil)
+			_, err := helper.ExecuteWithContext(context.Background(), &ai.ToolContext{}, ai.ToolCall{
+				Name:      "helper",
+				Arguments: test.args,
+			})
+			if test.want == "" {
+				if err == nil {
+					t.Fatal("helper returned no error, want engine initialization error")
+				}
+				return
+			}
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("helper error = %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestKabibiHelperSystemMessageExplainsSemanticFileSearch(t *testing.T) {
@@ -150,6 +203,7 @@ func TestKabibiHelperUsesSemanticContentSearchForConceptDiscovery(t *testing.T) 
 		Arguments: map[string]any{
 			"task":        "Find the browser runtime initialization",
 			"description": "task-specific discovery constraints",
+			"explanation": "locate the implementation",
 		},
 	})
 	if err != nil {
@@ -393,6 +447,7 @@ func TestAdaptiveEmbedderBackgroundBatchAndHelperUsesLiveReopenedEngine(t *testi
 		Arguments: map[string]any{
 			"task":        "List txt files",
 			"description": "verify live reopened engine is used",
+			"explanation": "confirm the reopened engine is active",
 		},
 	})
 	if err != nil {
