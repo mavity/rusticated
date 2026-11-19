@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -58,6 +60,54 @@ func TestRustEventJSON(t *testing.T) {
 	events := parse("stdout", string(data))
 	if len(events) != 1 || events[0].Kind != "run" || events[0].Name != event.Name {
 		t.Fatalf("parse Rust event = %#v", events)
+	}
+}
+
+func TestRustPrettyTestOutput(t *testing.T) {
+	parse := parseRustTestOutput("rust", "rusticated-wasm", "crate")
+	for _, test := range []struct {
+		line string
+		kind string
+		name string
+	}{
+		{"test path::works ... ok", "pass", "path::works"},
+		{"test path::fails ... FAILED", "fail", "path::fails"},
+		{"test path::ignored ... ignored", "skip", "path::ignored"},
+	} {
+		events := parse("stdout", test.line)
+		if len(events) != 2 || events[0].Kind != "run" || events[1].Kind != test.kind ||
+			events[0].Name != test.name || events[1].Name != test.name {
+			t.Fatalf("parse Rust output %q = %#v", test.line, events)
+		}
+	}
+}
+
+func TestRustdocFlagsFromTargetConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	config := `[target.wasm32-rusticated-unknown-unknown]
+rustflags = [
+    "-Zunstable-options",
+    "--extern", "std=C:/workspace with spaces/libstd.rlib",
+    "-L", "dependency=C:/workspace/deps",
+]
+
+[target.other]
+rustflags = ["wrong-target"]
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flags, err := rustdocFlagsFromTargetConfig(configPath, "wasm32-rusticated-unknown-unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"-Zunstable-options",
+		"--extern", "std=C:/workspace with spaces/libstd.rlib",
+		"-L", "dependency=C:/workspace/deps",
+	}
+	if !reflect.DeepEqual(flags, want) {
+		t.Fatalf("rustdocFlagsFromTargetConfig() = %#v, want %#v", flags, want)
 	}
 }
 
@@ -263,9 +313,17 @@ func TestFinishRejectsRunsWithoutTestCases(t *testing.T) {
 }
 
 func TestSupportsGOOS(t *testing.T) {
-	allOS := goModule{Path: "u-root", WasmTest: true}
+	allOS := goModule{Path: "all-os", WasmTest: true}
 	if !supportsGOOS(allOS, "windows") || !supportsGOOS(allOS, "linux") || !supportsGOOS(allOS, "darwin") {
 		t.Fatal("module without NativeGOOS should support all GOOS values")
+	}
+
+	linuxOnly := goModule{Path: "u-root", NativeGOOS: []string{"linux"}}
+	if supportsGOOS(linuxOnly, "windows") || supportsGOOS(linuxOnly, "darwin") {
+		t.Fatal("Linux-only module should not support Windows or Darwin")
+	}
+	if !supportsGOOS(linuxOnly, "linux") {
+		t.Fatal("Linux-only module should support Linux")
 	}
 
 	unixOnly := goModule{Path: "mohabbat/washmhost", NativeGOOS: []string{"linux", "darwin"}}
@@ -274,6 +332,25 @@ func TestSupportsGOOS(t *testing.T) {
 	}
 	if !supportsGOOS(unixOnly, "linux") || !supportsGOOS(unixOnly, "darwin") {
 		t.Fatal("unix-only module should support linux and darwin")
+	}
+}
+
+func TestMatchesModuleOrPackage(t *testing.T) {
+	for _, test := range []struct {
+		filter  string
+		module  string
+		matches bool
+	}{
+		{filter: "ai", module: "u-root", matches: false},
+		{filter: "u-root", module: "u-root", matches: true},
+		{filter: "u-root/cmds/exp/ed", module: "u-root", matches: true},
+		{filter: "github.com/u-root/u-root/cmds/exp/ed", module: "u-root", matches: true},
+	} {
+		run := &testRun{filter: []string{test.filter}}
+		if got := run.matchesModuleOrPackage(test.module); got != test.matches {
+			t.Errorf("matchesModuleOrPackage(%q) with filter %q = %v, want %v",
+				test.module, test.filter, got, test.matches)
+		}
 	}
 }
 
@@ -303,10 +380,44 @@ func TestWorkspaceGoModulesIncludesURoot(t *testing.T) {
 			if !mod.WasmTest {
 				t.Fatal("u-root should have WasmTest enabled")
 			}
+			if supportsGOOS(mod, "windows") || !supportsGOOS(mod, "linux") {
+				t.Fatal("u-root should be native-testable only on Linux")
+			}
 			break
 		}
 	}
 	if !found {
 		t.Fatal("u-root not found in workspaceGoModules")
+	}
+}
+
+func TestRunStreamingCommandMatchesExpectedExitCode(t *testing.T) {
+	if runtime.GOOS == "wasip1" {
+		t.Skip("external shell execution is only tested on native Go targets")
+	}
+	run, err := newTestRun(t.TempDir(), 5*time.Second, 5*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.sink.events.Close()
+
+	command := "sh"
+	args := []string{"-c", "exit 2"}
+	if runtime.GOOS == "windows" {
+		command = "cmd.exe"
+		args = []string{"/d", "/c", "exit 2"}
+	}
+	spec := commandSpec{
+		Runner: "test", Target: "native-" + runtime.GOOS,
+		Suite: "expected-exit-code", Name: "nonzero",
+		Args: append([]string{command}, args...), ExpectedExitCode: 2,
+	}
+	if err := runStreamingCommand(run, spec); err != nil {
+		t.Fatalf("runStreamingCommand with expected exit 2: %v", err)
+	}
+
+	spec.ExpectedExitCode = 0
+	if err := runStreamingCommand(run, spec); err == nil {
+		t.Fatal("runStreamingCommand accepted exit 2 when exit 0 was expected")
 	}
 }

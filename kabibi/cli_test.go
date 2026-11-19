@@ -9,6 +9,7 @@ import (
 
 	"ai"
 	"github.com/mavity/rusticated/kabibi/config"
+	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
 func TestMainPackageDoesNotDirectlyImportCharmUIStack(t *testing.T) {
@@ -45,10 +46,24 @@ func TestParseCLIHelpFormsMatch(t *testing.T) {
 	if flagHelp.String() != positionalHelp.String() {
 		t.Fatalf("help outputs differ:\n--help:\n%s\nhelp:\n%s", flagHelp.String(), positionalHelp.String())
 	}
-	for _, want := range []string{"--command", "--prompt", "--edit", "--verbose"} {
+	for _, want := range []string{"--command", "--prompt", "--edit", "--verbose", "--version"} {
 		if !strings.Contains(flagHelp.String(), want) {
 			t.Errorf("help output missing %q", want)
 		}
+	}
+}
+
+func TestRunCLIVersionReportsVersion(t *testing.T) {
+	t.Setenv("MOHABBAT_VERBOSE", "")
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"--version"}, &stdout, &stderr, false); code != 0 {
+		t.Fatalf("runCLI(--version) = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "Kabibi "+shell.Version()+"\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("version command wrote stderr: %q", stderr.String())
 	}
 }
 

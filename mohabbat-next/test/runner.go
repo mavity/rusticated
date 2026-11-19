@@ -27,8 +27,10 @@ type goModule struct {
 }
 
 type rustPackage struct {
-	Name string
-	Path string
+	Name            string
+	Path            string
+	TestFeatures    []string
+	UnsupportedWasm string
 }
 
 type testRun struct {
@@ -44,13 +46,15 @@ type testRun struct {
 }
 
 type commandSpec struct {
-	Runner string
-	Target string
-	Suite  string
-	Dir    string
-	Args   []string
-	Env    []string
-	Parse  func(string, string) []testEvent
+	Runner           string
+	Target           string
+	Suite            string
+	Name             string
+	Dir              string
+	Args             []string
+	ExpectedExitCode int
+	Env              []string
+	Parse            func(string, string) []testEvent
 }
 
 type goJSONEvent struct {
@@ -166,8 +170,14 @@ func (r *testRun) buildHost() {
 }
 
 func (r *testRun) runNativeGo() {
+	target := "native-" + runtime.GOOS + "-" + runtime.GOARCH
 	for _, module := range workspaceGoModules {
 		if !supportsNativeGOOS(module) {
+			if r.matchesModuleOrPackage(module.Path) {
+				r.disable("go", target, module.Path,
+					"module NativeGOOS="+strings.Join(module.NativeGOOS, ","),
+					"target GOOS="+runtime.GOOS+" is unsupported")
+			}
 			continue
 		}
 		packages, err := r.listNativeTestPackages(module)
@@ -197,11 +207,11 @@ func (r *testRun) runNativeGo() {
 		}
 		r.runCommand(commandSpec{
 			Runner: "go",
-			Target: "native-" + runtime.GOOS + "-" + runtime.GOARCH,
+			Target: target,
 			Suite:  module.Path,
 			Dir:    filepath.Join(r.root, filepath.FromSlash(module.Path)),
 			Args:   args,
-			Parse:  parseGoJSON("go", "native-"+runtime.GOOS+"-"+runtime.GOARCH, module.Path),
+			Parse:  parseGoJSON("go", target, module.Path),
 		})
 	}
 }
@@ -215,6 +225,11 @@ func (r *testRun) runX64EmulatedGo() {
 	})
 	for _, module := range workspaceGoModules {
 		if !supportsGOOS(module, "windows") {
+			if r.matchesModuleOrPackage(module.Path) {
+				r.disable("go", target, module.Path,
+					"module NativeGOOS="+strings.Join(module.NativeGOOS, ","),
+					"target GOOS=windows is unsupported")
+			}
 			continue
 		}
 		packages, err := r.listTestPackages(module, env)
@@ -421,6 +436,21 @@ func (r *testRun) matchesWholeModule(modulePath string) bool {
 	return false
 }
 
+func (r *testRun) matchesModuleOrPackage(modulePath string) bool {
+	if len(r.filter) == 0 || r.matchesWholeModule(modulePath) || r.matches(modulePath) {
+		return true
+	}
+	for _, filter := range r.filter {
+		filter = strings.Trim(filepath.ToSlash(filter), "/")
+		if strings.HasPrefix(filter, modulePath+"/") ||
+			strings.Contains(filter, "/"+modulePath+"/") ||
+			strings.HasSuffix(filter, "/"+modulePath) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildGoTestWasm(packageDir, outputPath string) int {
 	root, err := findWorkspaceRoot()
 	if err != nil {
@@ -442,9 +472,14 @@ type wasmTestPackage struct {
 func (r *testRun) runRustWasm() {
 	var packages []rustPackage
 	for _, pkg := range rustWorkspacePackages {
-		if r.matches(pkg.Name) || r.matches(pkg.Path) {
-			packages = append(packages, pkg)
+		if !r.matches(pkg.Name) && !r.matches(pkg.Path) {
+			continue
 		}
+		if pkg.UnsupportedWasm != "" {
+			r.disable("rust", "rusticated-wasm", pkg.Name, "WASM target support", pkg.UnsupportedWasm)
+			continue
+		}
+		packages = append(packages, pkg)
 	}
 	if len(packages) == 0 {
 		return
@@ -453,17 +488,42 @@ func (r *testRun) runRustWasm() {
 		r.fail("Rusticated Rust WASM", "test host is missing; run without -skip-build")
 		return
 	}
+	testTargetDir, err := os.MkdirTemp("", "mohabbat-next-rust-wasm-test-*")
+	if err != nil {
+		r.fail("Rusticated Rust WASM", "create Cargo target directory: "+err.Error())
+		return
+	}
+	defer func() {
+		if err := os.RemoveAll(testTargetDir); err != nil {
+			r.fail("Rusticated Rust WASM", "remove Cargo target directory: "+err.Error())
+		}
+	}()
 	target := filepath.Join(r.root, "target", "rusticated-spec", "config.toml")
+	rustdocFlags, err := rustdocFlagsFromTargetConfig(target, "wasm32-rusticated-unknown-unknown")
+	if err != nil {
+		r.fail("Rusticated Rust WASM", "read Rustdoc target flags: "+err.Error())
+		return
+	}
+	rustdocFlagParts := make([]string, len(rustdocFlags))
+	for i, flag := range rustdocFlags {
+		rustdocFlagParts[i] = strconv.Quote(flag)
+	}
+	rustdocConfig := "build.rustdocflags=[" + strings.Join(rustdocFlagParts, ", ") + "]"
 	for _, pkg := range packages {
-		args := []string{
-			"cargo", "test", "-p", pkg.Name, "--target", "wasm32-rusticated-unknown-unknown",
+		args := []string{"cargo", "test", "-p", pkg.Name}
+		if len(pkg.TestFeatures) > 0 {
+			args = append(args, "--features", strings.Join(pkg.TestFeatures, ","))
+		}
+		args = append(args,
+			"--target-dir", testTargetDir,
+			"--target", "wasm32-rusticated-unknown-unknown",
 			"--config", target, "--config", "unstable.json-target-spec=true",
 			"--config", fmt.Sprintf(
 				`target.wasm32-rusticated-unknown-unknown.runner=[%s]`,
 				strconv.Quote(r.hostPath),
 			),
-			"-Z", "unstable-options", "--message-format=json", "--", "--format=json",
-		}
+			"--config", rustdocConfig,
+			"-Z", "unstable-options", "--message-format=json", "--", "--format=pretty")
 		r.runCommand(commandSpec{
 			Runner: "rust",
 			Target: "rusticated-wasm",
@@ -473,6 +533,43 @@ func (r *testRun) runRustWasm() {
 			Parse:  parseRustTestOutput("rust", "rusticated-wasm", pkg.Name),
 		})
 	}
+}
+
+func rustdocFlagsFromTargetConfig(configPath, target string) ([]string, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", configPath, err)
+	}
+	sectionHeader := "[target." + target + "]"
+	config := string(data)
+	sectionStart := strings.Index(config, sectionHeader)
+	if sectionStart < 0 {
+		return nil, fmt.Errorf("target section %q is missing", sectionHeader)
+	}
+	section := config[sectionStart+len(sectionHeader):]
+	if nextSection := strings.Index(section, "\n["); nextSection >= 0 {
+		section = section[:nextSection]
+	}
+	const marker = "rustflags = ["
+	flagsStart := strings.Index(section, marker)
+	if flagsStart < 0 {
+		return nil, fmt.Errorf("rustflags are missing from target section %q", sectionHeader)
+	}
+	flagsBody := section[flagsStart+len(marker):]
+	flagsEnd := strings.Index(flagsBody, "\n]")
+	if flagsEnd < 0 {
+		return nil, fmt.Errorf("rustflags array in target section %q is unterminated", sectionHeader)
+	}
+	array := strings.TrimSpace(flagsBody[:flagsEnd])
+	array = strings.TrimSuffix(array, ",")
+	var flags []string
+	if err := json.Unmarshal([]byte("["+array+"]"), &flags); err != nil {
+		return nil, fmt.Errorf("parse Rust flags: %w", err)
+	}
+	if len(flags) == 0 {
+		return nil, fmt.Errorf("target section %q has no Rust flags", sectionHeader)
+	}
+	return flags, nil
 }
 
 type zigTestSource struct {
@@ -534,6 +631,7 @@ func zigTestArgs(root string, source zigTestSource) []string {
 		args = append(args, "--dep", "pal_abi")
 	}
 	if source.UsesZwasm {
+		args = append(args, "-lc")
 		args = append(args, "--dep", "zwasm")
 	}
 	args = append(args, rootArg)
@@ -552,10 +650,11 @@ func zigTestArgs(root string, source zigTestSource) []string {
 
 var zigTestSources = []zigTestSource{
 	{Path: "mohabbat-next/pal/abi/guest.zig"},
-	{Path: "mohabbat-next/pal/windows/net_ops.zig", NativeGOOS: "windows"},
 	{Path: "mohabbat-next/pal/windows/platform.zig", NativeGOOS: "windows", UsesPalABI: true},
 	{Path: "mohabbat-next/pal/unix/platform_linux.zig", NativeGOOS: "linux", UsesPalABI: true},
 	{Path: "mohabbat-next/runtime/src/pal_bridge.zig"},
+	{Path: "mohabbat-next/runtime/src/guest_memory.zig"},
+	{Path: "mohabbat-next/runtime/src/wasm_env.zig", UsesPalABI: true, UsesZwasm: true},
 	{Path: "mohabbat-next/runtime/src/main.zig", UsesPalABI: true, UsesZwasm: true},
 	{Path: "mohabbat-next/brot/unix/src/decompress.zig"},
 	{Path: "mohabbat-next/brot/unix/src/pool.zig"},
@@ -755,17 +854,17 @@ var workspaceGoModules = []goModule{
 	{Path: "platform", WasmTest: true},
 	{Path: "pope", WasmTest: true},
 	{Path: "rusticated-go/internal/filepathlite", WasmTest: true},
-	{Path: "u-root", WasmTest: true, Mod: "mod"},
+	{Path: "u-root", NativeGOOS: []string{"linux"}, WasmTest: true, Mod: "mod"},
 }
 
 var rustWorkspacePackages = []rustPackage{
 	{Name: "rusticated", Path: "rusticated-rust"},
 	{Name: "demo", Path: "demo"},
-	{Name: "brot", Path: "mohabbat/brot"},
-	{Name: "nodepty", Path: "mohabbat/nodepty"},
+	{Name: "brot", Path: "mohabbat/brot", TestFeatures: []string{"rusticated-test-harness"}},
+	{Name: "nodepty", Path: "mohabbat/nodepty", UnsupportedWasm: "Node PTY addon has platform backends only for Windows, Linux, and macOS"},
 	{Name: "loch", Path: "demo/loch"},
 	{Name: "kabibi-rust", Path: "kabibi-rust"},
-	{Name: "dload", Path: "dload"},
+	{Name: "dload", Path: "dload", UnsupportedWasm: "dynamic loader depends on native dlopen APIs and OS-specific executable-memory/thread primitives"},
 }
 
 func parseGoJSON(runner, target, suite string) func(string, string) []testEvent {
@@ -845,9 +944,20 @@ func parseRustTestOutput(runner, target, suite string) func(string, string) []te
 				return []testEvent{{Kind: kind, Runner: runner, Target: target, Suite: suite, Name: event.Name}}
 			}
 		}
+		if match := rustPrettyTestLine.FindStringSubmatch(strings.TrimSpace(line)); len(match) == 3 {
+			kind := map[string]string{"ok": "pass", "FAILED": "fail", "ignored": "skip"}[match[2]]
+			if kind != "" {
+				return []testEvent{
+					{Kind: "run", Runner: runner, Target: target, Suite: suite, Name: match[1]},
+					{Kind: kind, Runner: runner, Target: target, Suite: suite, Name: match[1]},
+				}
+			}
+		}
 		return outputEvents(runner, target)(stream, line)
 	}
 }
+
+var rustPrettyTestLine = regexp.MustCompile(`^test (.+) \.\.\. (ok|FAILED|ignored)$`)
 
 var zigTestLine = regexp.MustCompile(`^\d+/\d+\s+(.+)\.\.\.(OK|FAIL|SKIP)$`)
 
@@ -913,7 +1023,10 @@ func outputEvents(runner, target string) func(string, string) []testEvent {
 }
 
 func runStreamingCommand(run *testRun, spec commandSpec) error {
-	if err := run.sink.emit(testEvent{Kind: "run", Runner: spec.Runner, Target: spec.Target, Suite: spec.Suite, Detail: strings.Join(spec.Args, " ")}); err != nil {
+	if err := run.sink.emit(testEvent{
+		Kind: "run", Runner: spec.Runner, Target: spec.Target,
+		Suite: spec.Suite, Name: spec.Name, Detail: strings.Join(spec.Args, " "),
+	}); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), run.suiteTimeout)
@@ -1053,8 +1166,17 @@ func runStreamingCommand(run *testRun, spec commandSpec) error {
 	if terminalErr != nil {
 		return fmt.Errorf("%w; logs: stdout=%s stderr=%s", errors.Join(terminalErr, waitErr), stdoutLogPath, stderrLogPath)
 	}
+	exitCode := 0
 	if waitErr != nil {
-		return fmt.Errorf("command failed: %w; logs: stdout=%s stderr=%s", waitErr, stdoutLogPath, stderrLogPath)
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			return fmt.Errorf("wait for command: %w; logs: stdout=%s stderr=%s", waitErr, stdoutLogPath, stderrLogPath)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	if exitCode != spec.ExpectedExitCode {
+		return fmt.Errorf("command exited with code %d, want %d; logs: stdout=%s stderr=%s",
+			exitCode, spec.ExpectedExitCode, stdoutLogPath, stderrLogPath)
 	}
 	return nil
 }

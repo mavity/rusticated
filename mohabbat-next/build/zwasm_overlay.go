@@ -511,12 +511,6 @@ pub const Linker = struct {
 		// 6. api/instance.zig
 		{
 			file: "src/api/instance.zig",
-			old:  `const std = @import("std");`,
-			new: `const std = @import("std");
-const c_alloc: std.mem.Allocator = if (builtin.os.tag == .freestanding) undefined else std.heap.c_allocator;`,
-		},
-		{
-			file: "src/api/instance.zig",
 			old: `pub inline fn engineIo(e: *const Engine) ?std.Io {
     const t: *std.Io.Threaded = @ptrCast(@alignCast(e.io_threaded orelse return null));
     return t.io();
@@ -727,13 +721,13 @@ pub export fn wasm_engine_new() callconv(.c) ?*Engine {
 			old:  `std.heap.c_allocator`,
 			new:  `c_alloc`,
 		},
-		// 7. api/vec.zig, api/types.zig, api/module_introspect.zig, api/trap_surface.zig
 		{
-			file: "src/api/vec.zig",
+			file: "src/api/instance.zig",
 			old:  `const std = @import("std");`,
 			new: `const std = @import("std");
-const c_alloc: std.mem.Allocator = if (@import("builtin").os.tag == .freestanding) undefined else std.heap.c_allocator;`,
+const c_alloc: std.mem.Allocator = if (builtin.os.tag == .freestanding) undefined else std.heap.c_allocator;`,
 		},
+		// 7. api/vec.zig, api/types.zig, api/module_introspect.zig, api/trap_surface.zig
 		{
 			file: "src/api/vec.zig",
 			old:  `std.heap.c_allocator`,
@@ -751,14 +745,29 @@ const c_alloc: std.mem.Allocator = if (@import("builtin").os.tag == .freestandin
 		},
 		{
 			file: "src/api/trap_surface.zig",
+			old:  `std.heap.c_allocator`,
+			new:  `c_alloc`,
+		},
+		{
+			file: "src/api/vec.zig",
 			old:  `const std = @import("std");`,
 			new: `const std = @import("std");
 const c_alloc: std.mem.Allocator = if (@import("builtin").os.tag == .freestanding) undefined else std.heap.c_allocator;`,
 		},
 		{
 			file: "src/api/trap_surface.zig",
-			old:  `std.heap.c_allocator`,
-			new:  `c_alloc`,
+			old:  `const std = @import("std");`,
+			new: `const std = @import("std");
+const c_alloc: std.mem.Allocator = if (@import("builtin").os.tag == .freestanding) undefined else std.heap.c_allocator;`,
+		},
+		{
+			file: "src/platform/signal.zig",
+			old: `            const rip: usize = @intCast(exception_info.ContextRecord.Rip);
+            if (trap_registry.classify(fault_addr, rip)) |stub| {
+                exception_info.ContextRecord.Rip = stub;`,
+			new: `            const pc = exception_info.ContextRecord.getRegs().ip;
+            if (trap_registry.classify(fault_addr, pc)) |stub| {
+                exception_info.ContextRecord.setIp(stub);`,
 		},
 		// 8. wasi/fd.zig, wasi/path.zig, wasi/host.zig, wasi/jit_dispatch.zig
 		{

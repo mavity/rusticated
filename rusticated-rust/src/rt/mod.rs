@@ -307,6 +307,7 @@ pub(crate) fn run<F: core::future::Future<Output = ()> + 'static>(future: F) {
 #[macro_export]
 macro_rules! main {
     ($future:expr) => {
+        #[cfg(not(test))]
         #[unsafe(no_mangle)]
         pub extern "Rust" fn main() {
             $crate::spawn!($future);
@@ -326,7 +327,7 @@ macro_rules! spawn {
             $crate::rt::executor::run($future);
         }
 
-        #[cfg(target_family = "wasm")]
+        #[cfg(all(target_family = "wasm", not(test)))]
         #[unsafe(no_mangle)]
         pub unsafe extern "Rust" fn guest_init() {
             $crate::rt::submit_main($future);

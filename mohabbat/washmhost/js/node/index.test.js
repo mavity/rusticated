@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HostState, makeBrainImports, mapErrno, marshalStat, READ_FLAG_POSITIONAL, translatePath } from './index.js';
+import { HostState, makeBrainImports, mapErrno, marshalStat, READ_FLAG_POSITIONAL, translatePath, WRITE_FLAG_POSITIONAL } from './index.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import tls from 'node:tls';
 
 async function waitForHostResult(host, memory, ovPtr) {
     for (let attempt = 0; attempt < 100 && host.completionQueue.length === 0; attempt++) {
@@ -238,11 +239,13 @@ test('cancel removes listeners for a pending network accept', () => {
 
       env.net_accept(ovPtr, handle);
       assert.equal(server.listenerCount('connection'), 1);
+      assert.equal(host.getHandle(handle).acceptWaiters.length, 1);
       assert.equal(server.listenerCount('error'), 1);
       env.cancel(ovPtr);
 
       assert.equal(host.hasPending(), false);
-      assert.equal(server.listenerCount('connection'), 0);
+      assert.equal(server.listenerCount('connection'), 1);
+      assert.equal(host.getHandle(handle).acceptWaiters.length, 0);
       assert.equal(server.listenerCount('error'), 0);
       host.drainQueue();
       assert.equal(view.getUint32(ovPtr, true), 1);
@@ -296,6 +299,51 @@ test('cancel closes pending network opens without allocating handles or completi
           assert.equal(view.getUint32(ovPtr, true), 1);
           assert.equal(view.getUint32(ovPtr + 4, true), 11);
       }
+});
+
+test('UDP net_open sends and receives datagrams through ABI handles', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const addrPtr = 256;
+    const addrLen = writeString(memory, addrPtr, '127.0.0.1');
+
+    const listenOv = 32;
+    env.net_open(listenOv, addrPtr, addrLen, 0, 1 << 2);
+    assert.equal(await waitForHostResult(host, memory, listenOv), 0);
+    const port = view.getBigUint64(listenOv + 8, true);
+    const listenHandle = view.getBigUint64(listenOv + 16, true);
+    assert.ok(port > 0n);
+    assert.ok(listenHandle > 0n);
+
+    const connectOv = 64;
+    env.net_open(connectOv, addrPtr, addrLen, Number(port), 1 | (1 << 2));
+    assert.equal(await waitForHostResult(host, memory, connectOv), 0);
+    const clientHandle = view.getBigUint64(connectOv + 16, true);
+    assert.ok(clientHandle > 0n);
+
+    const payload = new TextEncoder().encode('udp-payload');
+    const payloadPtr = 512;
+    new Uint8Array(memory.buffer, payloadPtr, payload.length).set(payload);
+    const writeOv = 96;
+    env.write(writeOv, clientHandle, payloadPtr, payload.length);
+    assert.equal(await waitForHostResult(host, memory, writeOv), 0);
+    assert.equal(view.getBigUint64(writeOv + 16, true), BigInt(payload.length));
+
+    const readOv = 128;
+    const readPtr = 640;
+    env.read(readOv, listenHandle, readPtr, payload.length);
+    assert.equal(await waitForHostResult(host, memory, readOv), 0);
+    assert.equal(view.getBigUint64(readOv + 16, true), BigInt(payload.length));
+    assert.deepEqual(
+        Array.from(new Uint8Array(memory.buffer, readPtr, payload.length)),
+        Array.from(payload),
+    );
+
+    env.handle_close(clientHandle);
+    env.handle_close(listenHandle);
 });
 
 test('multiple concurrent signal waiters are all completed on signal', () => {
@@ -366,6 +414,41 @@ test('positioned read preserves the handle position and rejects stream handles',
         env.read(256, handle, 361, 1);
         assert.equal(view.getUint32(260, true), 61); // WASI EOVERFLOW
     } finally {
+        fs.closeSync(fd);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('positioned write preserves the handle position and zero-fills gaps', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-pwrite-'));
+    const file = path.join(dir, 'data.txt');
+    fs.writeFileSync(file, 'abc');
+    const fd = fs.openSync(file, 'r+');
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const handle = host.allocHandle({ type: 'file', fd, path: file });
+    const view = new DataView(memory.buffer);
+
+    try {
+        env.seek(32, handle, 1n, 0);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        assert.equal(view.getBigUint64(48, true), 1n);
+
+        view.setUint32(64, WRITE_FLAG_POSITIONAL, true);
+        view.setBigUint64(88, 5n, true);
+        new Uint8Array(memory.buffer, 256, 1)[0] = 'Z'.charCodeAt(0);
+        env.write(64, handle, 256, 1);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+        assert.equal(view.getBigUint64(80, true), 1n);
+        assert.deepEqual(fs.readFileSync(file), Buffer.from([0x61, 0x62, 0x63, 0, 0, 0x5a]));
+
+        env.seek(96, handle, 0n, 1);
+        assert.equal(await waitForHostResult(host, memory, 96), 0);
+        assert.equal(view.getBigUint64(112, true), 1n);
+    } finally {
+        host.handles.delete(handle);
         fs.closeSync(fd);
         fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -483,6 +566,40 @@ test('process_pipe transfers data from its write handle to its read handle', asy
     }
 });
 
+test('process_pipe preserves buffered data and EOF when the writer closes before reading', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+
+    env.process_pipe(32);
+    const handles = view.getBigUint64(48, true);
+    const readHandle = handles & 0xFFFF_FFFFn;
+    const writeHandle = handles >> 32n;
+    const message = Buffer.from([0, 0x80, 0xff]);
+    new Uint8Array(memory.buffer, 512, message.length).set(message);
+
+    try {
+        env.write(64, writeHandle, 512, message.length);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+        host.freeHandle(writeHandle);
+
+        env.read(96, readHandle, 256, message.length);
+        assert.equal(await waitForHostResult(host, memory, 96), 0);
+        assert.equal(view.getUint32(96, true), 1);
+        assert.deepEqual(Buffer.from(memory.buffer, 256, message.length), message);
+
+        env.read(128, readHandle, 320, 1);
+        assert.equal(await waitForHostResult(host, memory, 128), 0);
+        assert.equal(view.getUint32(128, true), 1);
+        assert.equal(view.getBigUint64(144, true), 0n);
+    } finally {
+        host.freeHandle(writeHandle);
+        host.freeHandle(readHandle);
+    }
+});
+
 test('process_spawn keeps fd-backed pipe stdio alive until the child closes', async () => {
     const memory = new WebAssembly.Memory({ initial: 1 });
     const host = new HostState();
@@ -528,6 +645,22 @@ test('process_spawn keeps fd-backed pipe stdio alive until the child closes', as
         if (readHandle !== undefined) env.handle_close(readHandle);
         if (childHandle !== undefined) env.handle_close(childHandle);
     }
+});
+
+test('process_spawn reports missing executables instead of returning a child handle', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const program = path.join(os.tmpdir(), `mohabbat-missing-${process.pid}-${Date.now()}.exe`);
+    const config = Buffer.concat([Buffer.from(program), Buffer.from([0, 0, 0, 0])]);
+    new Uint8Array(memory.buffer, 1024, config.length).set(config);
+
+    env.process_spawn(32, 1024, config.length);
+    const errno = await waitForHostResult(host, memory, 32);
+
+    assert.notEqual(errno, 0);
+    assert.equal(host.handles.size, 3);
 });
 
 test('path link ABI creates hard links and reports readlink buffer requirements', async (t) => {
@@ -594,6 +727,66 @@ test('path link ABI creates hard links and reports readlink buffer requirements'
     }
 });
 
+test('path_readlink preserves relative target components', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-relative-readlink-'));
+    const link = path.join(dir, 'link');
+    const target = '../parent/../target';
+    try {
+        try {
+            fs.symlinkSync(target, link, 'file');
+        } catch (err) {
+            if (['EPERM', 'EACCES', 'ENOTSUP'].includes(err.code)) {
+                t.skip(`cannot create symlink on this host: ${err.code}`);
+                return;
+            }
+            throw err;
+        }
+
+        const memory = new WebAssembly.Memory({ initial: 1 });
+        const host = new HostState();
+        host.memory = memory;
+        const { env } = makeBrainImports(host, []);
+        const pathLen = writeString(memory, 128, link);
+        env.path_readlink(32, 128, pathLen, 256, 128);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        const resultLen = Number(new DataView(memory.buffer).getBigUint64(48, true));
+        const actualTarget = Buffer.from(memory.buffer, 256, resultLen).toString().replaceAll('\\', '/');
+        assert.equal(actualTarget, target);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('path_chmod follows a symlink and changes target permissions', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-chmod-link-'));
+    const target = path.join(dir, 'target');
+    const link = path.join(dir, 'link');
+    fs.writeFileSync(target, 'mode');
+    try {
+        try {
+            fs.symlinkSync(target, link, 'file');
+        } catch (err) {
+            if (['EPERM', 'EACCES', 'ENOTSUP'].includes(err.code)) {
+                t.skip(`cannot create symlink on this host: ${err.code}`);
+                return;
+            }
+            throw err;
+        }
+
+        const memory = new WebAssembly.Memory({ initial: 1 });
+        const host = new HostState();
+        host.memory = memory;
+        const { env } = makeBrainImports(host, []);
+        const pathLen = writeString(memory, 128, link);
+        env.path_chmod(32, 128, pathLen, 0o400);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        assert.equal(fs.statSync(target).mode & 0o222, 0);
+    } finally {
+        fs.chmodSync(target, 0o600);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test('allocHandle assigns incrementing descriptors', () => {
     const env = new HostState();
     const h1 = env.allocHandle({ type: 'file' });
@@ -641,6 +834,35 @@ test('path_set_times sets requested timestamps and preserves omitted values', as
         assert.ok(Math.abs(Number(stat.mtimeNs - beforeNowNs)) < 5_000_000_000);
 
         assert.equal(await callAndWait(96, 0x01, 1n, 1_000_000_000, 0n, 0), 28);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('path_set_times round-trips pre-epoch values or reports unsupported', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-pre-epoch-'));
+    const file = path.join(dir, 'times.txt');
+    fs.writeFileSync(file, 'timestamps');
+    const seconds = BigInt(Math.floor(Date.UTC(1960, 0, 2, 3, 4, 5) / 1000));
+
+    try {
+        const before = fs.statSync(file, { bigint: true });
+        const encodedPath = new TextEncoder().encode(file);
+        new Uint8Array(memory.buffer, 128, encodedPath.length).set(encodedPath);
+        env.path_set_times(32, 128, encodedPath.length, seconds, 0, seconds, 0, 0x01 | 0x04);
+        const result = await waitForHostResult(host, memory, 32);
+        const stat = fs.statSync(file, { bigint: true });
+        if (process.platform === 'win32') {
+            assert.equal(result, 58); // WASI ENOTSUP
+            assert.equal(stat.mtimeNs, before.mtimeNs);
+        } else {
+            assert.equal(result, 0);
+            assert.equal(stat.mtimeNs, seconds * 1_000_000_000n);
+        }
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -762,6 +984,34 @@ test('get_cwd returns the host-native path', () => {
     if (process.platform === 'win32') assert.match(actual, /^[A-Za-z]:\\/);
 });
 
+test('set_cwd rejects missing and non-directory paths without changing cwd', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-set-cwd-'));
+    const file = path.join(root, 'file');
+    const child = path.join(root, 'child');
+    fs.writeFileSync(file, 'not a directory');
+    fs.mkdirSync(child);
+
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ cwd: root, listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    try {
+        const missingLen = writeString(memory, 128, path.join(root, 'missing'));
+        assert.equal(env.set_cwd(128, missingLen), 44); // WASI ENOENT
+        assert.equal(host.cwd, root);
+
+        const fileLen = writeString(memory, 128, file);
+        assert.equal(env.set_cwd(128, fileLen), 54); // WASI ENOTDIR
+        assert.equal(host.cwd, root);
+
+        const childLen = writeString(memory, 128, child);
+        assert.equal(env.set_cwd(128, childLen), 0);
+        assert.equal(host.cwd, child);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('get_env canonicalizes Windows path aliases and omits PWD values', () => {
     const memory = new WebAssembly.Memory({ initial: 1 });
     const host = new HostState({
@@ -835,6 +1085,102 @@ test('net_accept returns EBADF for missing handles and EINVAL for non-listeners'
     assert.equal(view.getUint32(36, true), 8);
     env.net_accept(64, 1n);
     assert.equal(view.getUint32(68, true), 28);
+});
+
+test('net_accept accepts connections established before the guest starts waiting', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const addrPtr = 256;
+    const addrLen = writeString(memory, addrPtr, '127.0.0.1');
+    let serverHandle = 0n;
+    let acceptedHandle = 0n;
+    let client;
+
+    try {
+        env.net_open(32, addrPtr, addrLen, 0, 0);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        const port = Number(view.getBigUint64(40, true));
+        serverHandle = view.getBigUint64(48, true);
+
+        client = net.connect({ host: '127.0.0.1', port });
+        await new Promise((resolve, reject) => {
+            client.once('connect', resolve);
+            client.once('error', reject);
+        });
+        await new Promise(resolve => setImmediate(resolve));
+
+        env.net_accept(64, serverHandle);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+        acceptedHandle = view.getBigUint64(80, true);
+        assert.ok(acceptedHandle > 0n);
+    } finally {
+        if (client) client.destroy();
+        const serverState = serverHandle ? host.getHandle(serverHandle) : null;
+        if (serverState && serverState.pendingConnections) {
+            for (const socket of serverState.pendingConnections) socket.destroy();
+        }
+        if (acceptedHandle) env.handle_close(acceptedHandle);
+        if (serverHandle) env.handle_close(serverHandle);
+    }
+});
+
+test('net_lookup rejects empty names and preserves IPv4-mapped IPv6 literals', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const namePtr = 256;
+    const resultPtr = 512;
+
+    const mappedName = '::ffff:192.0.2.1';
+    const mappedLength = writeString(memory, namePtr, mappedName);
+    env.net_lookup(32, namePtr, mappedLength, resultPtr, 64);
+    assert.equal(await waitForHostResult(host, memory, 32), 0);
+
+    const count = view.getUint32(resultPtr + 4, true);
+    const families = new Uint8Array(memory.buffer, resultPtr + 8, count);
+    let addressOffset = resultPtr + 8 + count;
+    const mappedBytes = Buffer.from([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1,
+    ]);
+    let foundMappedAddress = false;
+    for (const family of families) {
+        const length = family === 4 ? 4 : 16;
+        const address = Buffer.from(memory.buffer, addressOffset, length);
+        if (family === 6 && address.equals(mappedBytes)) foundMappedAddress = true;
+        addressOffset += length;
+    }
+    assert.ok(foundMappedAddress, 'lookup should encode the IPv4-mapped IPv6 address');
+
+    env.net_lookup(96, namePtr, 0, resultPtr, 64);
+    assert.equal(await waitForHostResult(host, memory, 96), 28); // WASI EINVAL
+});
+
+test('net_cert_verify maps malformed later DER entries to EINVAL', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const rootPem = tls.rootCertificates[0];
+    assert.ok(rootPem);
+    const rootDer = Buffer.from(
+        rootPem.replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s/g, ''),
+        'base64',
+    );
+    const chain = Buffer.alloc(12 + rootDer.length);
+    chain.writeUInt32LE(2, 0);
+    chain.writeUInt32LE(rootDer.length, 4);
+    chain.writeUInt32LE(0, 8);
+    rootDer.copy(chain, 12);
+    const nameLen = writeString(memory, 128, 'example.com');
+    new Uint8Array(memory.buffer, 1024, chain.length).set(chain);
+
+    env.net_cert_verify(32, 128, nameLen, 1024, chain.length);
+    assert.equal(await waitForHostResult(host, memory, 32), 28);
 });
 
 test('path_remove removes an empty directory with flag 0x200', async () => {

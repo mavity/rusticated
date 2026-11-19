@@ -60,7 +60,7 @@ pub const OPEN_FLAG_DIRECTORY: u32 = 0x2000;
 
 pub const PATH_STAT_FLAG_NOFOLLOW: u32 = 1 << 0;
 pub const PATH_REMOVE_FLAG_DIR: u32 = 1 << 0;
-pub const PATH_SET_TIMES_FLAG_NOFOLLOW: u32 = 1 << 0;
+pub const PATH_SET_TIMES_FLAG_NOFOLLOW: u32 = 1 << 4;
 pub const NET_OPEN_FLAG_LISTEN: u32 = 1 << 0;
 pub const NET_OPEN_FLAG_IPV6: u32 = 1 << 1;
 

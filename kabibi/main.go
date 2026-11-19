@@ -22,6 +22,7 @@ type cliOptions struct {
 	edit       string
 	verbose    bool
 	help       bool
+	version    bool
 	disableAI  bool
 	toolServer bool
 
@@ -47,6 +48,7 @@ Flags:
       --vscode-tool-server  Run the VS Code terminal-tool protocol over stdio
   -v, --verbose          Verbose diagnostics (includes prompts and tool I/O; find-files progress goes to stderr)
   -h, --help             Show this help
+      --version          Show the Kabibi version
 
 A single positional file path runs that file as a shell script. Other positional
 arguments are joined with spaces and sent directly to the AI as a one-shot prompt.
@@ -76,6 +78,7 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 	fs.StringVarP(&opts.prompt, "prompt", "p", "", "Execute a prompt in one-shot mode and exit")
 	fs.StringVar(&opts.edit, "edit", "", "Open a file in the editor, save on exit, and close Kabibi")
 	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O; find-files progress goes to stderr")
+	fs.BoolVar(&opts.version, "version", false, "Show the Kabibi version")
 	fs.BoolVar(&opts.disableAI, "disable-ai", false, "Disable Kabibi AI behavior in this shell process")
 	fs.BoolVar(&opts.toolServer, "vscode-tool-server", false, "Run the VS Code terminal-tool protocol over stdio")
 
@@ -154,6 +157,10 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 	}
 	verbose = verbose || opts.verbose || os.Getenv("MOHABBAT_VERBOSE") == "1"
 	ai.Verbose = verbose
+	if opts.version {
+		fmt.Fprintf(stdout, "Kabibi %s\n", shell.Version())
+		return 0
+	}
 	if opts.toolServer {
 		if err := shell.RunVSCodeToolServer(context.Background(), os.Stdin, stdout, ""); err != nil {
 			fmt.Fprintf(stderr, "kabibi: VS Code tool server: %v\n", err)

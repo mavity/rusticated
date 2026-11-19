@@ -17,6 +17,26 @@ const EntryKind = enum(u8) {
     start = 3,
 };
 
+const EntrySelection = struct {
+    has_run: bool = false,
+    has_init: bool = false,
+    has_start: bool = false,
+
+    fn observe(self: *EntrySelection, name: []const u8, is_func: bool) void {
+        if (!is_func) return;
+        if (std.mem.eql(u8, name, "run")) self.has_run = true;
+        if (std.mem.eql(u8, name, "_initialize")) self.has_init = true;
+        if (std.mem.eql(u8, name, "_start")) self.has_start = true;
+    }
+
+    fn result(self: EntrySelection) EntryKind {
+        if (self.has_run) return .run;
+        if (self.has_init) return .initialize;
+        if (self.has_start) return .start;
+        return .none;
+    }
+};
+
 const RuntimeGlobals = struct {
     initialized: bool = false,
     arena: pal_bridge.PalArenaState = .{},
@@ -50,17 +70,11 @@ fn validateImports(module: *zwasm.Module, alloc: std.mem.Allocator) void {
 fn findEntryKind(module: *zwasm.Module, alloc: std.mem.Allocator) EntryKind {
     var exports = module.exports(alloc) catch panicMsg("zwasm: module.exports failed");
     defer exports.deinit();
-    var has_init = false;
-    var has_start = false;
+    var selection: EntrySelection = .{};
     for (exports.items) |exp| {
-        if (exp.kind != .func) continue;
-        if (std.mem.eql(u8, exp.name, "run")) return .run;
-        if (std.mem.eql(u8, exp.name, "_initialize")) has_init = true;
-        if (std.mem.eql(u8, exp.name, "_start")) has_start = true;
+        selection.observe(exp.name, exp.kind == .func);
     }
-    if (has_init) return .initialize;
-    if (has_start) return .start;
-    return .none;
+    return selection.result();
 }
 
 fn invokeEntry(g: *RuntimeGlobals) void {
@@ -170,4 +184,108 @@ test "zwasm runtime unit smoke" {
     // Verify basic compilation of pal_bridge + wasm_env + zwasm
     _ = @import("pal_bridge.zig");
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(pal_abi.PalAbiTable));
+}
+
+const TestExport = struct {
+    name: []const u8,
+    kind: u8 = 0,
+};
+
+fn appendTestByte(buf: *[512]u8, len: *usize, byte: u8) void {
+    buf[len.*] = byte;
+    len.* += 1;
+}
+
+fn appendTestLeb(buf: *[512]u8, len: *usize, value: usize) void {
+    var remaining = value;
+    while (remaining >= 0x80) {
+        appendTestByte(buf, len, @as(u8, @truncate(remaining)) | 0x80);
+        remaining >>= 7;
+    }
+    appendTestByte(buf, len, @truncate(remaining));
+}
+
+fn entryKindForTest(exports: []const TestExport, has_memory: bool) !EntryKind {
+    var wasm: [512]u8 = undefined;
+    var len: usize = 0;
+    for ("\x00asm\x01\x00\x00\x00") |byte| appendTestByte(&wasm, &len, byte);
+
+    appendTestByte(&wasm, &len, 1);
+    appendTestByte(&wasm, &len, 4);
+    for (&[_]u8{ 1, 0x60, 0, 0 }) |byte| appendTestByte(&wasm, &len, byte);
+
+    appendTestByte(&wasm, &len, 3);
+    appendTestByte(&wasm, &len, 2);
+    for (&[_]u8{ 1, 0 }) |byte| appendTestByte(&wasm, &len, byte);
+
+    if (has_memory) {
+        appendTestByte(&wasm, &len, 5);
+        appendTestByte(&wasm, &len, 3);
+        for (&[_]u8{ 1, 0, 1 }) |byte| appendTestByte(&wasm, &len, byte);
+    }
+
+    var export_payload_len: usize = 1;
+    for (exports) |entry_export| export_payload_len += 1 + entry_export.name.len + 2;
+    appendTestByte(&wasm, &len, 7);
+    appendTestLeb(&wasm, &len, export_payload_len);
+    appendTestLeb(&wasm, &len, exports.len);
+    for (exports) |entry_export| {
+        appendTestLeb(&wasm, &len, entry_export.name.len);
+        for (entry_export.name) |byte| appendTestByte(&wasm, &len, byte);
+        appendTestByte(&wasm, &len, entry_export.kind);
+        appendTestByte(&wasm, &len, 0);
+    }
+
+    appendTestByte(&wasm, &len, 10);
+    appendTestByte(&wasm, &len, 4);
+    for (&[_]u8{ 1, 2, 0, 0x0b }) |byte| appendTestByte(&wasm, &len, byte);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var engine = try zwasm.Engine.init(allocator, .{});
+    var module = try engine.compile(wasm[0..len]);
+    var module_exports = try module.exports(allocator);
+    defer module_exports.deinit();
+    var selection: EntrySelection = .{};
+    for (module_exports.items) |exp| {
+        selection.observe(exp.name, exp.kind == .func);
+    }
+    return selection.result();
+}
+
+test "runtime entry selection honors exported function precedence" {
+    const run = [_]TestExport{.{ .name = "run" }};
+    const initialize = [_]TestExport{.{ .name = "_initialize" }};
+    const start = [_]TestExport{.{ .name = "_start" }};
+    const none = [_]TestExport{};
+    const run_and_initialize = [_]TestExport{ .{ .name = "_initialize" }, .{ .name = "run" } };
+    const initialize_and_start = [_]TestExport{ .{ .name = "_start" }, .{ .name = "_initialize" } };
+    const start_and_run = [_]TestExport{ .{ .name = "_start" }, .{ .name = "run" } };
+    const memory_and_start = [_]TestExport{ .{ .name = "memory", .kind = 2 }, .{ .name = "_start" } };
+    const run_and_memory = [_]TestExport{ .{ .name = "run" }, .{ .name = "memory", .kind = 2 } };
+    const memory_only = [_]TestExport{.{ .name = "memory", .kind = 2 }};
+
+    const Case = struct {
+        name: []const u8,
+        exports: []const TestExport,
+        has_memory: bool = false,
+        want: EntryKind,
+    };
+    const cases = [_]Case{
+        .{ .name = "run only", .exports = &run, .want = .run },
+        .{ .name = "initialize only", .exports = &initialize, .want = .initialize },
+        .{ .name = "start only", .exports = &start, .want = .start },
+        .{ .name = "no exports", .exports = &none, .want = .none },
+        .{ .name = "run takes precedence over initialize", .exports = &run_and_initialize, .want = .run },
+        .{ .name = "initialize takes precedence over start", .exports = &initialize_and_start, .want = .initialize },
+        .{ .name = "run takes precedence regardless of export order", .exports = &start_and_run, .want = .run },
+        .{ .name = "non-function export is ignored", .exports = &memory_and_start, .has_memory = true, .want = .start },
+        .{ .name = "run is found before a non-function export", .exports = &run_and_memory, .has_memory = true, .want = .run },
+        .{ .name = "non-function exports do not select an entry", .exports = &memory_only, .has_memory = true, .want = .none },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.want, try entryKindForTest(case.exports, case.has_memory));
+    }
 }

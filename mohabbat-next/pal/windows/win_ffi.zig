@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const pal_abi = @import("pal_abi");
 
 pub const win_cc = pal_abi.pal_cc;
@@ -145,8 +146,10 @@ pub fn mapWinError(win_err: u32) u32 {
 pub fn fileTimeToUnixNs(ft: FileTime) i64 {
     const raw: u64 = (@as(u64, ft.high) << 32) | ft.low;
     const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
-    if (raw < EPOCH_DIFF_100NS) return 0;
-    const rel = raw - EPOCH_DIFF_100NS;
-    const ns = rel *| 100;
-    return @intCast(@min(ns, @as(u64, @intCast(0x7fff_ffff_ffff_ffff))));
+    const ns = (@as(i128, raw) - @as(i128, EPOCH_DIFF_100NS)) * 100;
+    const clamped = @max(
+        @as(i128, std.math.minInt(i64)),
+        @min(ns, @as(i128, std.math.maxInt(i64))),
+    );
+    return @intCast(clamped);
 }

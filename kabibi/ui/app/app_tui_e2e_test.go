@@ -340,7 +340,25 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 	// Replay the ENTIRE raw ANSI byte stream emitted by Host through a real 80x24 VT emulator
 	// and verify the complete screen content.
 	emu := vt.NewEmulator(termW, termH)
-	_, _ = emu.WriteString(rawTermOut.String())
+	t.Cleanup(func() {
+		if err := emu.Close(); err != nil {
+			t.Errorf("close VT emulator: %v", err)
+		}
+	})
+	responsesDone := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, emu)
+		responsesDone <- err
+	}()
+	if _, err := emu.WriteString(rawTermOut.String()); err != nil {
+		t.Fatalf("replay terminal output: %v", err)
+	}
+	if err := emu.Close(); err != nil {
+		t.Fatalf("close VT emulator: %v", err)
+	}
+	if err := <-responsesDone; err != nil {
+		t.Fatalf("drain VT emulator responses: %v", err)
+	}
 
 	screenLines := extractEmulatorLines(emu, termW, termH)
 

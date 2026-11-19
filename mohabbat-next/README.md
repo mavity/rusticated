@@ -81,7 +81,8 @@ per-suite stdout/stderr logs. Filter by a project path or package suffix with
 `-p`; comma-separated filters are supported. Unavailable runner/target
 combinations are emitted as `disabled` events with probe and symptom. The
 launcher exits unsuccessfully if the selection executes no test cases or any
-runner fails.
+runner fails. Native GOOS support is declared per Go module; for example,
+`u-root` runs native tests on Linux only and is reported as disabled on Windows.
 
 Go WASM suites are not silently excluded: unsupported or failing packages
 remain visible as failures. Linux/WSL execution is deferred.

@@ -338,6 +338,12 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 			// Build rusticated-test (libtest) against the freshly built sysroot.
 			testManifest := filepath.Join(ws, "rusticated-test", "Cargo.toml")
 			if _, statErr := os.Stat(testManifest); statErr == nil {
+				testTargetDir := filepath.Join(ws, "target", "sysroot-libtest-"+customName)
+				if err := os.RemoveAll(testTargetDir); err != nil {
+					errCh <- fmt.Errorf("remove stale libtest target dir for %s: %w", customName, err)
+					return
+				}
+
 				var testFlags strings.Builder
 				testFlags.WriteString(rustflags)
 				for _, crate := range []string{"std", "core", "alloc", "compiler_builtins"} {
@@ -353,14 +359,15 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 					"--target", targetArg)
 				testCmd.Env = upsertEnv(os.Environ(), "RUSTFLAGS", testFlags.String())
 				testCmd.Env = upsertEnv(testCmd.Env, "RUST_TARGET_PATH", rustTargetPath)
-				testCmd.Env = upsertEnv(testCmd.Env, "CARGO_TARGET_DIR", targetDir)
+				testCmd.Env = upsertEnv(testCmd.Env, "CARGO_TARGET_DIR", testTargetDir)
 				testCmd.Dir = ws
 				if err := runCmd(testCmd, "sysroot test build "+customName, verbose); err != nil {
 					errCh <- fmt.Errorf("sysroot test build failed for %s: %w", customName, err)
 					return
 				}
 
-				if testEntries, err := os.ReadDir(depsDir); err == nil {
+				testDepsDir := filepath.Join(testTargetDir, customName, "release", "deps")
+				if testEntries, err := os.ReadDir(testDepsDir); err == nil {
 					var bestTestTime int64
 					for _, entry := range testEntries {
 						if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rlib") {
@@ -374,7 +381,7 @@ func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 								mtime = info.ModTime().UnixNano()
 							}
 							if _, ok := paths["test"]; !ok || mtime >= bestTestTime {
-								absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
+								absPath, _ := filepath.Abs(filepath.Join(testDepsDir, filename))
 								paths["test"] = filepath.ToSlash(cleanWindowsPath(absPath))
 								bestTestTime = mtime
 							}

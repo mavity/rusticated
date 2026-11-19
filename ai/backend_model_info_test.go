@@ -10,6 +10,7 @@ type modelInfoTestDriver struct {
 	LMDriver
 	failedGetter          string
 	getterErr             error
+	marshaledString       string
 	maxContextTokens      uint32
 	isDynamicContext      bool
 	logLevel              int32
@@ -18,7 +19,8 @@ type modelInfoTestDriver struct {
 }
 
 func (*modelInfoTestDriver) ensureLoaded(string) error { return nil }
-func (*modelInfoTestDriver) stringToCPtr(string) (uint64, func(), error) {
+func (d *modelInfoTestDriver) stringToCPtr(value string) (uint64, func(), error) {
+	d.marshaledString = value
 	return 1, func() {}, nil
 }
 func (d *modelInfoTestDriver) setLogLevel(level int32) error {
@@ -53,6 +55,28 @@ func (d *modelInfoTestDriver) loadedFileSupportsFunctionCalling(uint64) (bool, e
 }
 func (d *modelInfoTestDriver) loadedFileModalitySupportedBackends(uint64, int32) ([]uint32, error) {
 	return nil, d.getterError("supported backends")
+}
+
+func TestSharedInspectModelNormalizesMangledWindowsPaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "backslash prefix", path: `\C:\models\model.litertlm`, want: `C:\models\model.litertlm`},
+		{name: "slash prefix", path: `/C:/models/model.litertlm`, want: `C:\models\model.litertlm`},
+		{name: "relative path", path: `models\model.litertlm`, want: `models\model.litertlm`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			driver := &modelInfoTestDriver{}
+			if _, err := sharedInspectModel(driver, "library", test.path); err != nil {
+				t.Fatalf("sharedInspectModel() error = %v", err)
+			}
+			if driver.marshaledString != test.want {
+				t.Fatalf("marshaled model path = %q, want %q", driver.marshaledString, test.want)
+			}
+		})
+	}
 }
 
 func TestSharedInspectModelPropagatesGetterErrors(t *testing.T) {

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import net from 'node:net';
+import dgram from 'node:dgram';
 import dns from 'node:dns';
 import tls from 'node:tls';
 import child_process from 'node:child_process';
@@ -20,6 +21,8 @@ const L = (...args) => VERBOSE && console.error(...args);
 const FLAG_COMPLETED = 1;
 // This request flag selects the read-specific u64 offset at ovPtr + 24.
 const READ_FLAG_POSITIONAL = 1 << 24;
+// This request flag selects the write-specific u64 offset at ovPtr + 24.
+const WRITE_FLAG_POSITIONAL = 1 << 25;
 
 let cachedRootCerts = null;
 function getRootCerts() {
@@ -476,7 +479,15 @@ class HostState {
         item.socket.destroy();
         if (item.leftovers) item.leftovers = null;
       }
-      else if (item.type === 'server') item.server.close();
+      else if (item.type === 'udp') item.socket.close();
+      else if (item.type === 'server') {
+        if (item.onConnection) item.server.removeListener('connection', item.onConnection);
+        if (item.pendingConnections) {
+          for (const socket of item.pendingConnections) socket.destroy();
+          item.pendingConnections = [];
+        }
+        item.server.close();
+      }
       else if (item.type === 'pipe_r') {
         item.stream.destroy();
         if (item.leftovers) item.leftovers = null;
@@ -783,6 +794,11 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
     const guestPath = Buffer.from(hs.getGuestSlice(ptr, len)).toString().trim();
     if (guestPath.length === 0) return wasiEINVAL;
     const hostPath = translatePath(guestPath, hs.cwd);
+    try {
+      if (!fs.statSync(hostPath).isDirectory()) return wasiENOTDIR;
+    } catch (error) {
+      return mapErrno(error);
+    }
     hs.cwd = hostPath;
     return wasiSuccess;
   }
@@ -842,6 +858,41 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       return;
     }
     const opId = hs.registerOp(ovPtrNum);
+
+    if (h.type === 'udp') {
+      const deliver = (message) => {
+        const slice = message.slice(0, bLen);
+        hs.enqueue(() => {
+          if (!hs.isOpActive(ovPtr, opId)) return;
+          if (slice.length > 0) guestWrite(bPtr, slice);
+          hs.completeOp(ovPtr, opId, 0, 0, slice.length);
+        });
+      };
+      if (h.error) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(h.error), 0, 0));
+      } else if (h.messages.length > 0) {
+        deliver(h.messages.shift());
+      } else {
+        const waiter = (error, message) => {
+          if (h.readWaiter !== waiter) return;
+          h.readWaiter = null;
+          if (error) {
+            hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(error), 0, 0));
+          } else {
+            deliver(message);
+          }
+        };
+        if (h.readWaiter) {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEBUSY, 0, 0));
+          return;
+        }
+        h.readWaiter = waiter;
+        hs.setOpCanceler(ovPtrNum, opId, () => {
+          if (h.readWaiter === waiter) h.readWaiter = null;
+        });
+      }
+      return;
+    }
 
     if (handle === 0n || (h.type === 'stdio' && h.fd === 0)) {
       // stdin — use readable event for async
@@ -953,6 +1004,8 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
           return;
         }
 
+        if (h.type === 'pipe_r' && h.stream.readableEnded) h.closed = true;
+
         if (h.leftovers && h.leftovers.length > 0) {
           const n = Math.min(h.leftovers.length, bLenNum);
           const chunk = h.leftovers.slice(0, n);
@@ -991,40 +1044,73 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
   }
 
   // ── write ────────────────────────────────────────────────────────────────────
-  // Signature: (ovPtr i32, handle i64, bufferPtr i32, bufferLen i32)
+  // Positioned writes extend the Overlapped request with a u64 offset.
   function write(ovPtr, handle, bufferPtr, bufferLen) {
-    const bLen = Number(bufferLen);
-    const bPtr = Number(bufferPtr);
+    const ovPtrNum = Number(ovPtr) >>> 0;
+    const view = hs.view;
+    if (ovPtrNum + 24 > view.byteLength) {
+      writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+      return;
+    }
+    const requestFlags = view.getUint32(ovPtrNum, true);
+    if ((requestFlags & ~WRITE_FLAG_POSITIONAL) !== 0) {
+      writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+      return;
+    }
+    const positioned = (requestFlags & WRITE_FLAG_POSITIONAL) !== 0;
+    let position = null;
+    if (positioned) {
+      if (ovPtrNum + 32 > view.byteLength) {
+        writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+        return;
+      }
+      const offset = view.getBigUint64(ovPtrNum + 24, true);
+      if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
+        writeOverlapped(view, ovPtrNum, wasiEOVERFLOW, 0, 0);
+        return;
+      }
+      position = Number(offset);
+    }
+
+    const bLen = Number(bufferLen) >>> 0;
+    const bPtr = Number(bufferPtr) >>> 0;
+    if (bPtr + bLen > view.byteLength) {
+      writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+      return;
+    }
     const dataCopy = Buffer.from(hs.getGuestSlice(bPtr, bLen));
 
     const h = hs.getHandle(handle);
-    if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
+    if (!h) { writeOverlapped(view, ovPtrNum, wasiEBADF, 0, 0); return; }
+    if (positioned && h.type !== 'file') {
+      writeOverlapped(view, ovPtrNum, wasiESPIPE, 0, 0);
+      return;
+    }
     if (h.type === 'stdio') {
       if (h.fd === 0) {
-        writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
+        writeOverlapped(view, ovPtrNum, wasiEBADF, 0, 0);
         return;
       }
       h.stream.write(dataCopy);
-      writeOverlapped(hs.view, ovPtr, wasiSuccess, 0, bLen);
+      writeOverlapped(view, ovPtrNum, wasiSuccess, 0, bLen);
       return;
     }
-
-    const opId = hs.registerOp(ovPtr);
+    const opId = hs.registerOp(ovPtrNum);
 
     if (h.type === 'file') {
       queueFileOperation(h, (done) => {
-        const filePosition = h.append ? null : h.position;
+        const filePosition = positioned ? position : h.append ? null : h.position;
         fs.write(h.fd, dataCopy, 0, dataCopy.length, filePosition, (err, n) => {
           const complete = (writeErr, errno = writeErr ? mapErrno(writeErr) : wasiSuccess) => {
-            if (!writeErr && !h.append && n > 0) h.position += n;
+            if (!writeErr && !positioned && !h.append && n > 0) h.position += n;
             hs.enqueue(() => {
-              if (!hs.isOpActive(ovPtr, opId)) return;
-              hs.completeOp(ovPtr, opId, errno, 0, errno ? 0 : n);
+              if (!hs.isOpActive(ovPtrNum, opId)) return;
+              hs.completeOp(ovPtrNum, opId, errno, 0, errno ? 0 : n);
             });
             done();
           };
 
-          if (err || !h.append) {
+          if (err || positioned || !h.append) {
             complete(err);
             return;
           }
@@ -1040,6 +1126,16 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
             h.position = Number(stat.size);
             complete(null);
           });
+        });
+      });
+      return;
+    }
+
+    if (h.type === 'udp') {
+      h.socket.send(dataCopy, (err) => {
+        hs.enqueue(() => {
+          if (!hs.isOpActive(ovPtr, opId)) return;
+          hs.completeOp(ovPtr, opId, err ? mapErrno(err) : 0, 0, err ? 0 : dataCopy.length);
         });
       });
       return;
@@ -1400,9 +1496,20 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
   function path_chmod(ovPtr, pathPtr, pathLen, mode) {
     const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const opId = hs.registerOp(ovPtr);
-    fs.chmod(pathStr, Number(mode), (err) => {
+    const chmod = (targetPath) => fs.chmod(targetPath, Number(mode), (err) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
     });
+    if (process.platform === 'win32') {
+      fs.realpath(pathStr, (err, targetPath) => {
+        if (err) {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
+          return;
+        }
+        chmod(targetPath);
+      });
+      return;
+    }
+    chmod(pathStr);
   }
 
   // ── path_set_times ──────────────────────────────────────────────────────────
@@ -1423,6 +1530,12 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       (setMtime && (Number(mtimeNsec) < 0 || Number(mtimeNsec) >= 1_000_000_000));
     if (invalid) {
       hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+      return;
+    }
+    // Node/libuv on Windows does not round-trip negative Unix timestamps.
+    if (process.platform === 'win32' &&
+        ((setAtime && Number(atimeSec) < 0) || (setMtime && Number(mtimeSec) < 0))) {
+      hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, wasiENOTSUP, 0, 0));
       return;
     }
 
@@ -1501,11 +1614,102 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
   // ── net_open ─────────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, addrPtr i32, addrLen i32, port i32, flags i32)
   // flags bit 0 = connect (1) vs listen (0)
+  function ensureServerAcceptQueue(serverState) {
+    if (!serverState.acceptWaiters) serverState.acceptWaiters = [];
+    if (!serverState.pendingConnections) serverState.pendingConnections = [];
+    if (serverState.onConnection) return;
+    serverState.onConnection = (socket) => {
+      const waiter = serverState.acceptWaiters.shift();
+      if (waiter) waiter(socket);
+      else serverState.pendingConnections.push(socket);
+    };
+    serverState.server.on('connection', serverState.onConnection);
+  }
+
   function net_open(ovPtr, addrPtr, addrLen, port, flags) {
     const addr      = Buffer.from(hs.getGuestSlice(Number(addrPtr), Number(addrLen))).toString();
     const iPort     = Number(port);
     const isConnect = (Number(flags) & 1) !== 0;
+    const isUDP      = (Number(flags) & (1 << 2)) !== 0;
     const opId = hs.registerOp(ovPtr);
+
+    if (isUDP) {
+      let socket;
+      try {
+        socket = dgram.createSocket(net.isIP(addr) === 6 ? 'udp6' : 'udp4');
+      } catch (e) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0n));
+        return;
+      }
+
+      let hItem = null;
+      const onError = (e) => {
+        if (hItem) {
+          hItem.error = e;
+          if (hItem.readWaiter) hItem.readWaiter(e);
+          return;
+        }
+        socket.removeListener('connect', onConnect);
+        socket.removeListener('listening', onListening);
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0n));
+        try { socket.close(); } catch {}
+      };
+      const onMessage = (message) => {
+        if (hItem.readWaiter) {
+          hItem.readWaiter(null, Buffer.from(message));
+        } else {
+          hItem.messages.push(Buffer.from(message));
+        }
+      };
+      const onConnect = () => finishOpen(0);
+      const onListening = () => {
+        const address = socket.address();
+        finishOpen(address && typeof address === 'object' ? address.port : iPort);
+      };
+      const finishOpen = (boundPort) => {
+        if (!hs.isOpActive(ovPtr, opId)) {
+          try { socket.close(); } catch {}
+          return;
+        }
+        hItem = {
+          type: 'udp',
+          socket,
+          messages: [],
+          readWaiter: null,
+          error: null,
+        };
+        socket.on('message', onMessage);
+        const h = hs.allocHandle(hItem);
+        if (h === null) {
+          try { socket.close(); } catch {}
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiENOMEM, 0, 0n));
+          return;
+        }
+        hs.enqueue(() => {
+          if (!hs.isOpActive(ovPtr, opId)) {
+            hs.freeHandle(h);
+            return;
+          }
+          hs.completeOp(ovPtr, opId, 0, boundPort, h);
+        });
+      };
+
+      socket.on('error', onError);
+      hs.setOpCanceler(ovPtr, opId, () => {
+        socket.removeListener('connect', onConnect);
+        socket.removeListener('listening', onListening);
+        try { socket.close(); } catch {}
+      });
+      if (isConnect) {
+        socket.once('connect', onConnect);
+        socket.connect(iPort, addr);
+      } else {
+        socket.once('listening', onListening);
+        if (addr) socket.bind(iPort, addr);
+        else socket.bind(iPort);
+      }
+      return;
+    }
 
     if (isConnect) {
       const socket = net.createConnection({ host: addr, port: iPort });
@@ -1553,6 +1757,8 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       socket.on('error', onError);
     } else {
       const server = net.createServer();
+      const serverState = { type: 'server', server };
+      ensureServerAcceptQueue(serverState);
       const onListening = () => {
         const address = server.address();
         const boundPort = (address && typeof address === 'object' && address.port) ? address.port : iPort;
@@ -1561,7 +1767,7 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
             server.close();
             return;
           }
-          const h = hs.allocHandle({ type: 'server', server });
+          const h = hs.allocHandle(serverState);
           hs.completeOp(ovPtr, opId, 0, boundPort, h);
         });
       };
@@ -1588,11 +1794,8 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       return;
     }
     if (h.type !== 'server') { writeOverlapped(hs.view, ovPtr, wasiEINVAL, 0, 0); return; }
+    ensureServerAcceptQueue(h);
     const opId = hs.registerOp(ovPtr);
-    const cleanup = () => {
-      h.server.removeListener('connection', onConnection);
-      h.server.removeListener('error', onError);
-    };
     const onConnection = (socket) => {
       cleanup();
       if (!hs.isOpActive(ovPtr, opId)) {
@@ -1620,9 +1823,16 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       cleanup();
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
     };
+    const cleanup = () => {
+      const waiterIndex = h.acceptWaiters.indexOf(onConnection);
+      if (waiterIndex !== -1) h.acceptWaiters.splice(waiterIndex, 1);
+      h.server.removeListener('error', onError);
+    };
     hs.setOpCanceler(ovPtr, opId, cleanup);
-    h.server.once('connection', onConnection);
     h.server.once('error', onError);
+    const pending = h.pendingConnections.shift();
+    if (pending) onConnection(pending);
+    else h.acceptWaiters.push(onConnection);
   }
 
   // ── net_lookup ───────────────────────────────────────────────────────────────
@@ -1630,6 +1840,10 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
   function net_lookup(ovPtr, namePtr, nameLen, bufPtr, bufLen) {
     const name = Buffer.from(hs.getGuestSlice(Number(namePtr), Number(nameLen))).toString();
     const opId = hs.registerOp(ovPtr);
+    if (name.length === 0) {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0));
+      return;
+    }
     dns.lookup(name, { all: true }, (err, addresses) => {
       hs.enqueue(() => {
         if (!hs.isOpActive(ovPtr, opId)) return;
@@ -1644,6 +1858,14 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
             try {
               // Simple IPv6 parser
               let ip = a.address;
+              const ipv4Tail = ip.match(/:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+              if (ipv4Tail) {
+                const octets = ipv4Tail.slice(1).map(Number);
+                if (octets.some(octet => octet > 255)) continue;
+                const highWord = ((octets[0] << 8) | octets[1]).toString(16);
+                const lowWord = ((octets[2] << 8) | octets[3]).toString(16);
+                ip = `${ip.slice(0, ipv4Tail.index)}:${highWord}:${lowWord}`;
+              }
               if (ip.includes('::')) {
                 const [pre, post] = ip.split('::').map(s => s ? s.split(':') : []);
                 const mid = new Array(8 - (pre.length + post.length)).fill('0');
@@ -1700,7 +1922,11 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
           const dlen = chainBuf.readUInt32LE(4 + 4 * i);
           if (off + dlen > chainBuf.length) throw { code: 'EINVAL' };
           const der = chainBuf.slice(off, off + dlen);
-          certs.push(new crypto.X509Certificate(der));
+          try {
+            certs.push(new crypto.X509Certificate(der));
+          } catch (_) {
+            throw { code: 'EINVAL' };
+          }
           off += dlen;
         }
 
@@ -2026,10 +2252,43 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
       return;
     }
 
-    const ch = hs.allocHandle({ type: 'child', cp });
-    // resultExt = (pipeHandles << 32) | childHandle
-    const extResult = ch | (pipePackedRes << 32n);
-    hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, extResult));
+    let spawnResolved = false;
+    const cleanupSpawnPipes = () => {
+      releaseRetainedHandles();
+      for (const handle of pipePairs) hs.freeHandle(handle);
+    };
+    const onSpawn = () => {
+      if (spawnResolved) return;
+      spawnResolved = true;
+      const ch = hs.allocHandle({ type: 'child', cp });
+      // resultExt = (pipeHandles << 32) | childHandle
+      const extResult = ch | (pipePackedRes << 32n);
+      hs.enqueue(() => {
+        if (!hs.isOpActive(ovPtr, opId)) {
+          try { cp.kill('SIGKILL'); } catch (_) {}
+          hs.freeHandle(ch);
+          for (const handle of pipePairs) hs.freeHandle(handle);
+          return;
+        }
+        hs.completeOp(ovPtr, opId, 0, 0, extResult);
+      });
+    };
+    const onSpawnError = error => {
+      if (spawnResolved) {
+        L('[process] child process error:', error);
+        return;
+      }
+      spawnResolved = true;
+      cp.removeListener('spawn', onSpawn);
+      cleanupSpawnPipes();
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(error), 0, 0));
+    };
+    cp.once('spawn', onSpawn);
+    cp.on('error', onSpawnError);
+    cp.once('close', () => {
+      cp.removeListener('error', onSpawnError);
+      releaseRetainedHandles();
+    });
   }
 
   // ── process_pipe ─────────────────────────────────────────────────────────────
@@ -2455,4 +2714,4 @@ if (isMain) {
   }
 }
 
-export { HostState, READ_FLAG_POSITIONAL, translatePath };
+export { HostState, READ_FLAG_POSITIONAL, WRITE_FLAG_POSITIONAL, translatePath };

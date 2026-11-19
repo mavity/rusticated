@@ -11,6 +11,7 @@ pub const HandleEntry = struct {
     handle: win.HANDLE = null,
     is_socket: bool = false,
     is_udp: bool = false,
+    is_listener: bool = false,
     is_pty: bool = false,
     pty_read: win.HANDLE = null,
     pty_write: win.HANDLE = null,

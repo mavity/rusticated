@@ -2,16 +2,11 @@ const std = @import("std");
 const zwasm = @import("zwasm");
 const pal_abi = @import("pal_abi");
 const pal_bridge = @import("pal_bridge.zig");
+const guest_memory = @import("guest_memory.zig");
 
 fn guestSlice(caller: *zwasm.Caller, ptr_i32: i32, len_i32: i32) ?[]u8 {
     const mem_obj = caller.memory() orelse return null;
-    const mem = mem_obj.slice();
-    if (ptr_i32 < 0 or len_i32 < 0) return null;
-    const off: usize = @intCast(ptr_i32);
-    const len: usize = @intCast(len_i32);
-    const end = std.math.add(usize, off, len) catch return null;
-    if (end > mem.len) return null;
-    return mem[off..end];
+    return guest_memory.slice(mem_obj.slice(), ptr_i32, len_i32);
 }
 
 fn guestSliceChecked(caller: *zwasm.Caller, ptr_i32: i32, len_i32: i32) []u8 {
@@ -284,4 +279,43 @@ pub fn registerAll(linker: *zwasm.Linker) !void {
     try reg(linker, "tty_set_size", envTtySetSize);
     try reg(linker, "fd_isatty", envFdIsatty);
     try reg(linker, "system_info_wait", envSystemInfoWait);
+}
+
+test "guestSlice validates spans against zwasm caller memory" {
+    const Runtime = @typeInfo(@TypeOf(@as(zwasm.Caller, undefined).rt)).pointer.child;
+    var memory = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var runtime: Runtime = .{ .alloc = std.testing.allocator, .memory = memory[0..] };
+    var caller: zwasm.Caller = .{ .rt = &runtime };
+
+    const SpanCase = struct {
+        ptr: i32,
+        len: i32,
+        valid: bool,
+        start: usize = 0,
+        length: usize = 0,
+    };
+    const cases = [_]SpanCase{
+        .{ .ptr = 2, .len = 3, .valid = true, .start = 2, .length = 3 },
+        .{ .ptr = 12, .len = 4, .valid = true, .start = 12, .length = 4 },
+        .{ .ptr = 16, .len = 0, .valid = true, .start = 16 },
+        .{ .ptr = -1, .len = 1, .valid = false },
+        .{ .ptr = 0, .len = -1, .valid = false },
+        .{ .ptr = 15, .len = 2, .valid = false },
+        .{ .ptr = 17, .len = 0, .valid = false },
+    };
+
+    for (cases) |case| {
+        const span = guestSlice(&caller, case.ptr, case.len);
+        try std.testing.expectEqual(case.valid, span != null);
+        if (span) |bytes| {
+            try std.testing.expectEqualSlices(
+                u8,
+                memory[case.start..][0..case.length],
+                bytes,
+            );
+        }
+    }
+
+    runtime.memory = &.{};
+    try std.testing.expect(guestSlice(&caller, 0, 0) == null);
 }

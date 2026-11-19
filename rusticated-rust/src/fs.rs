@@ -76,7 +76,7 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a regular file.
     pub fn is_file(&self) -> bool {
-        #[cfg(any(target_family = "unix", rusticated_linux))]
+        #[cfg(any(target_family = "unix", rusticated_linux, target_family = "wasm"))]
         {
             (self.mode & 0o170000) == 0o100000
         }
@@ -84,7 +84,12 @@ impl Metadata {
         {
             (self.mode & 0x10) == 0
         }
-        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        #[cfg(not(any(
+            target_family = "unix",
+            rusticated_linux,
+            target_family = "windows",
+            target_family = "wasm"
+        )))]
         {
             false
         }
@@ -92,7 +97,7 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a directory.
     pub fn is_dir(&self) -> bool {
-        #[cfg(any(target_family = "unix", rusticated_linux))]
+        #[cfg(any(target_family = "unix", rusticated_linux, target_family = "wasm"))]
         {
             (self.mode & 0o170000) == 0o040000
         }
@@ -256,7 +261,7 @@ pub struct Permissions {
 impl Permissions {
     /// Returns whether the file is read-only.
     pub fn readonly(&self) -> bool {
-        #[cfg(any(target_family = "unix", rusticated_linux))]
+        #[cfg(any(target_family = "unix", rusticated_linux, target_family = "wasm"))]
         {
             (self.mode & 0o222) == 0
         }
@@ -264,7 +269,12 @@ impl Permissions {
         {
             (self.mode & 0x1) != 0
         }
-        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        #[cfg(not(any(
+            target_family = "unix",
+            rusticated_linux,
+            target_family = "windows",
+            target_family = "wasm"
+        )))]
         {
             false
         }

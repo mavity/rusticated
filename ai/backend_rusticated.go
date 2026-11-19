@@ -10,7 +10,6 @@ import (
 	"github.com/mavity/rusticated/platform"
 	"math"
 	"os"
-	"strings"
 	"sync"
 	"unsafe"
 )
@@ -123,15 +122,6 @@ type rusticatedDriver struct {
 
 func (d *rusticatedDriver) ensureLoaded(libPath string) error {
 	return ensureLMLibLoadedImpl(libPath)
-}
-
-func normalizeHostNativePath(s string) string {
-	if len(s) >= 4 && (s[0] == '/' || s[0] == '\\') &&
-		((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z')) &&
-		s[2] == ':' && (s[3] == '/' || s[3] == '\\') {
-		s = strings.ReplaceAll(s[1:], "/", `\`)
-	}
-	return s
 }
 
 func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func(), error) {

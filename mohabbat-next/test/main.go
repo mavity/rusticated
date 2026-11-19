@@ -68,6 +68,7 @@ func main() {
 	if !skipWasm {
 		run.runWasmGo()
 	}
+	run.runKabibiVegetableSmoke()
 	if !skipRust {
 		run.runRustWasm()
 	}
