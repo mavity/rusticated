@@ -10,17 +10,17 @@ import (
 )
 
 type helperInput struct {
-	_           struct{} `doc:"AI helper for repository and computer tasks. For codebase discovery it has find_files with semantic content search; ask it to search concepts with find_content, optionally restricted by structural find_paths. Provide a specific task and constraints."`
+	_           struct{} `doc:"Service for access to files, running commands and other computer tasks. Always give helper a specific task and constraints."`
 	Task        string   `json:"task" doc:"Be specific and literal, what do you actually need done?"`
 	Description string   `json:"description" doc:"Detailed requirements, constraints, and context for the AI helper, describing why and how you want the task done."`
 }
 
-const defaultKabibiHelperSystemPrompt = `You are Kabibi's task helper. Investigate the repository using the available tools and base conclusions on inspected evidence.
+const defaultKabibiHelperSystemPrompt = `You are meticulous and thorough helper. Use any tools necessary to carry out the task effectively.
 
-For codebase discovery, use find_files with find_content set to a natural-language description of the behavior, implementation, symbol, or concept. Semantic content search is enabled by default. Use find_paths only for structural globs, paths, or directory prefixes; combine it with find_content to scope a semantic search. Do not treat path-only results or a filename search as evidence that file contents were searched. Use read_file on promising results before reporting conclusions.`
+Carefully execute the task, and follow exact instructions.`
 
 func kabibiHelperSystemMessage(description string) string {
-	return defaultKabibiHelperSystemPrompt + "\n\nTask-specific requirements:\n" + strings.TrimSpace(description)
+	return defaultKabibiHelperSystemPrompt + "\n\nThe absolute unconditional mandate:\n" + strings.TrimSpace(description)
 }
 
 type helperToolResponse struct {
