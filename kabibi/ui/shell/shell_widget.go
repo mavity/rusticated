@@ -106,7 +106,7 @@ func formatStartupBanner(sessionErr error) string {
 
 func formatStartupBannerWithAI(sessionErr error, aiEnabled bool) string {
 	lines := []string{
-		"🐚 K A B I B I : wearable all-weather shell v" + getVer(),
+		"🐚︎ K A B I B I : wearable all-weather shell v" + getVer(),
 		"   - bash",
 		"   - file manager (Ctrl+O)",
 	}
@@ -2094,7 +2094,7 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 		if route == RouteShell {
 			if trimmed == "help" {
 				helpText :=
-					"🐚 K A B I B I : wearable all-weather shell v" + getVer() + "\n" +
+					"🐚︎ K A B I B I : wearable all-weather shell v" + getVer() + "\n" +
 						"> This is a prototype shell able to run on any platform: Windows, MacOS, Linux.\n" +
 						"\n" +
 						" - Kabibi is written in Go and compiled using a framework called Mohabbat (मोहब्बत love).\n" +

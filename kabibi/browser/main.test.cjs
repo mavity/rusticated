@@ -1587,6 +1587,223 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.doesNotMatch(source, /THREE\./);
 });
 
+test('CRT renderer substitutes exact shell text-presentation emoji with Kabibi logo using cell colors', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8');
+  const document = new FakeDocument();
+  const root = new FakeElement('div');
+  document.body.appendChild(root);
+
+  const drawnOps = [];
+  const createMock2dContext = () => {
+    const stateStack = [];
+    const ctx = {
+      filter: 'none',
+      fillStyle: '',
+      strokeStyle: '',
+      lineJoin: 'miter',
+      lineWidth: 1,
+      globalAlpha: 1,
+      imageSmoothingEnabled: true,
+      save() {
+        stateStack.push({
+          filter: ctx.filter,
+          fillStyle: ctx.fillStyle,
+          strokeStyle: ctx.strokeStyle,
+          globalAlpha: ctx.globalAlpha
+        });
+      },
+      restore() {
+        const prev = stateStack.pop();
+        if (prev) Object.assign(ctx, prev);
+      },
+      translate() {},
+      scale() {},
+      drawImage() {},
+      fillRect(x, y, w, h) {
+        drawnOps.push({ op: 'fillRect', x, y, w, h, fillStyle: ctx.fillStyle, filter: ctx.filter });
+      },
+      fill(pathObj) {
+        drawnOps.push({ op: 'fill', path: pathObj.d, fillStyle: ctx.fillStyle, alpha: ctx.globalAlpha, filter: ctx.filter });
+      },
+      stroke(pathObj) {
+        drawnOps.push({ op: 'stroke', path: pathObj.d, strokeStyle: ctx.strokeStyle, alpha: ctx.globalAlpha, filter: ctx.filter });
+      }
+    };
+    return ctx;
+  };
+
+  const origCreateElement = document.createElement.bind(document);
+  document.createElement = (tagName) => {
+    const el = origCreateElement(tagName);
+    if (String(tagName).toLowerCase() === 'canvas') {
+      el.width = 200;
+      el.height = 100;
+      el.getContext = (type) => {
+        if (type === 'webgl2') return createMockWebGL2Context();
+        if (type === '2d') return createMock2dContext();
+        return null;
+      };
+    }
+    return el;
+  };
+
+  const cells = {
+    '0,0': {
+      getChars: () => '\u{1F41A}\uFE0E',
+      getWidth: () => 1,
+      isFgDefault: () => false,
+      isFgPalette: () => true,
+      isFgRGB: () => false,
+      getFgColorMode: () => 0x01000000,
+      getFgColor: () => 6,
+      isBgDefault: () => true,
+      isBgPalette: () => false,
+      isBgRGB: () => false,
+      getBgColorMode: () => 0,
+      getBgColor: () => 0,
+      isInverse: () => false,
+      isInvisible: () => false,
+      isDim: () => false
+    },
+    '1,0': {
+      getChars: () => '\u{1F41A}',
+      getWidth: () => 2,
+      isFgDefault: () => true,
+      isFgPalette: () => false,
+      isFgRGB: () => false,
+      getFgColorMode: () => 0,
+      getFgColor: () => 0,
+      isBgDefault: () => true,
+      isBgPalette: () => false,
+      isBgRGB: () => false,
+      getBgColorMode: () => 0,
+      getBgColor: () => 0,
+      isInverse: () => false,
+      isInvisible: () => false,
+      isDim: () => false
+    }
+  };
+
+  const terminalContainer = new FakeElement('div');
+  root.appendChild(terminalContainer);
+  const terminal = {
+    cols: 10,
+    rows: 4,
+    element: new FakeElement('div'),
+    options: { theme: { background: '#07090e', foreground: '#e5e7eb', cyan: '#22d3ee' } },
+    hasSelection: () => false,
+    loadAddon() {},
+    resize() {},
+    buffer: {
+      active: {
+        viewportY: 0,
+        getLine: (row) => (row === 0 ? { getCell: (col) => cells[`${col},${row}`] || null } : null)
+      }
+    },
+    input() {},
+    _core: {
+      _renderService: {
+        dimensions: { device: { canvas: { width: 200, height: 100 }, cell: { width: 20, height: 25 } } },
+        onRender: () => ({ dispose() {} })
+      }
+    }
+  };
+
+  function createMockWebGL2Context() {
+    const noop = () => {};
+    return {
+      VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4,
+      ARRAY_BUFFER: 5, ELEMENT_ARRAY_BUFFER: 6, STATIC_DRAW: 7,
+      TEXTURE_2D: 8, TEXTURE0: 9, TEXTURE1: 10, TEXTURE_MIN_FILTER: 11, TEXTURE_MAG_FILTER: 12,
+      TEXTURE_WRAP_S: 13, TEXTURE_WRAP_T: 14, LINEAR: 15, CLAMP_TO_EDGE: 16,
+      SRGB8_ALPHA8: 17, RGBA: 18, UNSIGNED_BYTE: 19, UNPACK_FLIP_Y_WEBGL: 20,
+      FRAMEBUFFER: 21, COLOR_ATTACHMENT0: 22, DEPTH_ATTACHMENT: 23, DEPTH_COMPONENT24: 24,
+      RENDERBUFFER: 25, COLOR_BUFFER_BIT: 26, DEPTH_BUFFER_BIT: 27, DEPTH_TEST: 28,
+      TRIANGLES: 29, UNSIGNED_SHORT: 30, FLOAT: 31,
+      createShader: () => ({}), shaderSource: noop, compileShader: noop,
+      getShaderParameter: () => true, createProgram: () => ({}), attachShader: noop,
+      linkProgram: noop, getProgramParameter: () => true, getUniformLocation: () => ({}),
+      getAttribLocation: () => 0, createBuffer: () => ({}), bindBuffer: noop, bufferData: noop,
+      createVertexArray: () => ({}), bindVertexArray: noop, enableVertexAttribArray: noop,
+      vertexAttribPointer: noop, createTexture: () => ({}), activeTexture: noop, bindTexture: noop,
+      texParameteri: noop, texImage2D: noop, texSubImage2D: noop, pixelStorei: noop,
+      createFramebuffer: () => ({}), bindFramebuffer: noop, framebufferTexture2D: noop,
+      createRenderbuffer: () => ({}), bindRenderbuffer: noop, renderbufferStorage: noop,
+      framebufferRenderbuffer: noop, checkFramebufferStatus: () => 0, FRAMEBUFFER_COMPLETE: 0,
+      viewport: noop, clearColor: noop, clear: noop, enable: noop, disable: noop,
+      useProgram: noop, uniform1i: noop, uniform1f: noop, uniform2f: noop, uniform3f: noop,
+      uniformMatrix4fv: noop, drawElements: noop, drawArrays: noop, deleteTexture: noop,
+      deleteFramebuffer: noop, deleteRenderbuffer: noop, deleteBuffer: noop,
+      deleteVertexArray: noop, deleteProgram: noop, deleteShader: noop
+    };
+  }
+
+  class MockPath2D {
+    constructor(d) {
+      this.d = d;
+    }
+  }
+
+  class MockWebglAddon {
+    constructor() {
+      this._renderer = { _canvas: { width: 200, height: 100 } };
+    }
+    onContextLoss() {
+      return { dispose() {} };
+    }
+    dispose() {}
+  }
+
+  const sandbox = {
+    console,
+    Date,
+    Math,
+    Float32Array,
+    Uint16Array,
+    document,
+    location: { search: '' },
+    Path2D: MockPath2D,
+    ResizeObserver: class { observe() {} disconnect() {} },
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    getComputedStyle: () => ({})
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(source, sandbox);
+
+  const renderer = sandbox.KabibiBrowserSuperDemo.start({
+    terminal,
+    fitAddon: { fit() {} },
+    root,
+    terminalContainer,
+    dependencies: { WebglAddon: MockWebglAddon }
+  });
+  assert.equal(renderer.isFallback(), false);
+
+  const cellBgClear = drawnOps.find((op) => op.op === 'fillRect' && op.x === 0 && op.y === 0 && op.w === 40 && op.h === 50);
+  assert.ok(cellBgClear, 'Expected cell background repaint over shell+U+FE0E cell');
+  assert.equal(cellBgClear.fillStyle, '#07090e');
+  assert.equal(cellBgClear.filter, 'sepia(40%) saturate(1.05)');
+
+  const pathFills = drawnOps.filter((op) => op.op === 'fill');
+  assert.equal(pathFills.length, 6);
+  assert.equal(pathFills[0].fillStyle, '#22d3ee');
+  assert.deepEqual(
+    pathFills.slice(1).map((op) => op.fillStyle),
+    ['#FF3366', '#FF7700', '#FFCC00', '#10B981', '#3B82F6']
+  );
+
+  const pathStrokes = drawnOps.filter((op) => op.op === 'stroke');
+  assert.equal(pathStrokes.length, 7);
+  assert.ok(pathStrokes.every((op) => op.strokeStyle === '#22d3ee'));
+  assert.equal(drawnOps.filter((op) => op.op === 'fillRect' && op.x === 40).length, 0);
+
+  renderer.dispose();
+});
+
 test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction, Newtonian dispersion, and focal bounds', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);

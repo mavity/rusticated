@@ -22,6 +22,68 @@
     { label: '→', ariaLabel: 'Arrow right', arrow: 'C' }
   ];
 
+  const SHELL_TEXT_EMOJI = '\u{1F41A}\uFE0E';
+  const KABIBI_LOGO_VIEWBOX = { x: 6, y: 17, width: 100, height: 100 };
+  const KABIBI_LOGO_PATHS = {
+    shell: 'M 8.3,105 L 41.5,104.8 L 41.5,100 C 39.5,98.5 38.3,98 38.3,97.3 C 38.3,90 38.5,83 38.5,79.8 C 38.5,63 49,49 61.2,49 C 74.5,49 86.2,61.5 86.2,76.3 C 86.2,87 76.5,93.3 66,93.3 C 59,93.3 55,87.5 55,80.8 C 55,74.5 59,69.8 63,69.8 C 65.8,69.8 67.4,72.5 67.4,75.8 C 67.4,77.5 65,78.3 62.4,78.3 C 63.5,81 65.5,84 67.3,84 C 73,84 78.3,81 78.3,77 C 78.3,68 70.5,59.3 62.3,59.3 C 53.5,59.3 45,69.5 45,79.8 C 45,92.5 53.5,104.3 63.8,104.3 C 83,104.3 102.5,90 102.5,75.7 C 102.5,52 82.5,29.2 62,29.2 C 37.5,29.2 13.3,52 13.3,74.7 C 13.3,84 13.3,92 13.3,96.5 C 12,97.5 9.5,98.3 8.5,99 L 8.3,105 Z',
+    bands: [
+      { color: '#FF3366', d: 'M 63,69.8 C 65.8,69.8 67.4,72.5 67.4,75.8 C 67.4,77.5 65,78.3 62.4,78.3 C 63.5,81 65.5,84 67.3,84 L 66,93.3 C 59,93.3 55,87.5 55,80.8 C 55,74.5 59,69.8 63,69.8 Z' },
+      { color: '#FF7700', d: 'M 66,93.3 L 67.3,84 C 73,84 78.3,81 78.3,77 L 86.2,76.3 C 86.2,87 76.5,93.3 66,93.3 Z' },
+      { color: '#FFCC00', d: 'M 86.2,76.3 L 78.3,77 C 78.3,68 70.5,59.3 62.3,59.3 L 61.2,49 C 74.5,49 86.2,61.5 86.2,76.3 Z' },
+      { color: '#10B981', d: 'M 61.2,49 L 62.3,59.3 C 53.5,59.3 45,69.5 45,79.8 L 38.5,79.8 C 38.5,63 49,49 61.2,49 Z' },
+      { color: '#3B82F6', d: 'M 38.5,79.8 L 45,79.8 C 45,92.5 53.5,104.3 63.8,104.3 C 50,104.3 38.3,94 38.3,88 C 38.3,84 38.5,81.5 38.5,79.8 Z' }
+    ]
+  };
+  const ANSI_THEME_KEYS = [
+    'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+    'brightBlack', 'brightRed', 'brightGreen', 'brightYellow',
+    'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'
+  ];
+  const ANSI_DEFAULT_PALETTE = [
+    '#2e3436', '#cc0000', '#4e9a06', '#c4a000',
+    '#3465a4', '#75507b', '#06989a', '#d3d7cf',
+    '#555753', '#ef2929', '#8ae234', '#fce94f',
+    '#729fcf', '#ad7fa8', '#34e2e2', '#eeeeec'
+  ];
+
+  function resolveXtermCellColor(isDefault, isPalette, isRgb, mode, value, theme, fallbackColor) {
+    if (isDefault || mode === 0) return fallbackColor;
+    if (isRgb || mode === 0x03000000) {
+      const r = (value >> 16) & 0xff;
+      const g = (value >> 8) & 0xff;
+      const b = value & 0xff;
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+    if (isPalette || mode === 0x01000000 || mode === 0x02000000) {
+      if (value >= 0 && value < 16) {
+        return (theme && theme[ANSI_THEME_KEYS[value]]) || ANSI_DEFAULT_PALETTE[value];
+      }
+      if (value >= 16 && value < 232) {
+        const index = value - 16;
+        const rIdx = Math.floor(index / 36);
+        const gIdx = Math.floor((index % 36) / 6);
+        const bIdx = index % 6;
+        const toChannel = (c) => (c === 0 ? 0 : 55 + c * 40);
+        return `rgb(${toChannel(rIdx)}, ${toChannel(gIdx)}, ${toChannel(bIdx)})`;
+      }
+      if (value >= 232 && value <= 255) {
+        const gray = 8 + (value - 232) * 10;
+        return `rgb(${gray}, ${gray}, ${gray})`;
+      }
+    }
+    return fallbackColor;
+  }
+
+  function isBufferCellSelected(selection, col, bufferRow) {
+    if (!selection || !selection.start || !selection.end) return false;
+    const { start, end } = selection;
+    if (bufferRow < start.y || bufferRow > end.y) return false;
+    if (start.y === end.y) return col >= start.x && col < end.x;
+    if (bufferRow === start.y) return col >= start.x;
+    if (bufferRow === end.y) return col < end.x;
+    return true;
+  }
+
   function createKeyCapSvg(document, isWide) {
     const width = isWide ? 138 : 100;
     const height = 100;
@@ -1285,6 +1347,140 @@
       );
     }
 
+    let kabibiLogoPathCache = null;
+
+    function getKabibiLogoPaths() {
+      if (kabibiLogoPathCache) return kabibiLogoPathCache;
+      const Path2DCtor = global.Path2D;
+      if (typeof Path2DCtor !== 'function') return null;
+      kabibiLogoPathCache = {
+        shell: new Path2DCtor(KABIBI_LOGO_PATHS.shell),
+        bands: KABIBI_LOGO_PATHS.bands.map((band) => ({
+          color: band.color,
+          path: new Path2DCtor(band.d)
+        }))
+      };
+      return kabibiLogoPathCache;
+    }
+
+    function drawShellLogos(viewport, targetWidth, targetHeight) {
+      const buffer = terminal && terminal.buffer && terminal.buffer.active;
+      const cols = terminal && terminal.cols;
+      const rows = terminal && terminal.rows;
+      if (!buffer || !cols || !rows || typeof buffer.getLine !== 'function') return;
+      const logoPaths = getKabibiLogoPaths();
+      if (!logoPaths) return;
+
+      const renderService = terminal._core && terminal._core._renderService;
+      const device = renderService && renderService.dimensions && renderService.dimensions.device;
+      const deviceCell = device && device.cell;
+      const cellWidth = deviceCell && deviceCell.width > 0 && viewport.width > 0
+        ? (deviceCell.width / viewport.width) * targetWidth
+        : targetWidth / cols;
+      const cellHeight = deviceCell && deviceCell.height > 0 && viewport.height > 0
+        ? (deviceCell.height / viewport.height) * targetHeight
+        : targetHeight / rows;
+      if (cellWidth <= 0 || cellHeight <= 0) return;
+
+      const theme = (terminal.options && terminal.options.theme) || {};
+      const defaultBg = theme.background || '#07090e';
+      const defaultFg = theme.foreground || '#ffffff';
+      const selection = typeof terminal.hasSelection === 'function' && terminal.hasSelection() &&
+        typeof terminal.getSelectionPosition === 'function'
+        ? terminal.getSelectionPosition()
+        : null;
+      const viewportY = Number.isFinite(buffer.viewportY) ? buffer.viewportY : 0;
+      const reusableCell = typeof buffer.getNullCell === 'function' ? buffer.getNullCell() : undefined;
+
+      for (let row = 0; row < rows; row++) {
+        const bufferRow = viewportY + row;
+        const line = buffer.getLine(bufferRow);
+        if (!line || typeof line.getCell !== 'function') continue;
+        for (let col = 0; col < cols; col++) {
+          const cell = line.getCell(col, reusableCell);
+          if (!cell || typeof cell.getChars !== 'function') continue;
+          const widthCells = typeof cell.getWidth === 'function' ? cell.getWidth() : 1;
+          if (widthCells <= 0) continue;
+          if (cell.getChars() !== SHELL_TEXT_EMOJI) continue;
+
+          const fgMode = typeof cell.getFgColorMode === 'function' ? cell.getFgColorMode() : 0;
+          const fgVal = typeof cell.getFgColor === 'function' ? cell.getFgColor() : 0;
+          const bgMode = typeof cell.getBgColorMode === 'function' ? cell.getBgColorMode() : 0;
+          const bgVal = typeof cell.getBgColor === 'function' ? cell.getBgColor() : 0;
+
+          let fg = resolveXtermCellColor(
+            typeof cell.isFgDefault === 'function' && cell.isFgDefault(),
+            typeof cell.isFgPalette === 'function' && cell.isFgPalette(),
+            typeof cell.isFgRGB === 'function' && cell.isFgRGB(),
+            fgMode,
+            fgVal,
+            theme,
+            defaultFg
+          );
+          let bg = resolveXtermCellColor(
+            typeof cell.isBgDefault === 'function' && cell.isBgDefault(),
+            typeof cell.isBgPalette === 'function' && cell.isBgPalette(),
+            typeof cell.isBgRGB === 'function' && cell.isBgRGB(),
+            bgMode,
+            bgVal,
+            theme,
+            defaultBg
+          );
+          if (typeof cell.isInverse === 'function' && cell.isInverse()) {
+            const swapped = fg;
+            fg = bg;
+            bg = swapped;
+          }
+          const selected = isBufferCellSelected(selection, col, bufferRow);
+          if (selected && theme.selectionForeground) {
+            fg = theme.selectionForeground;
+          }
+
+          const x = col * cellWidth;
+          const y = row * cellHeight;
+          const w = widthCells * cellWidth;
+          const h = cellHeight;
+
+          textureContext.fillStyle = bg;
+          textureContext.fillRect(x, y, w, h);
+          if (selected) {
+            textureContext.fillStyle = theme.selectionBackground || 'rgba(255, 255, 255, 0.3)';
+            textureContext.fillRect(x, y, w, h);
+          }
+
+          if (typeof cell.isInvisible === 'function' && cell.isInvisible()) continue;
+
+          const scale = Math.min(w, h) / KABIBI_LOGO_VIEWBOX.width;
+          const drawX = x + (w - KABIBI_LOGO_VIEWBOX.width * scale) * 0.5;
+          const drawY = y + (h - KABIBI_LOGO_VIEWBOX.height * scale) * 0.5;
+
+          textureContext.save();
+          if (typeof cell.isDim === 'function' && cell.isDim()) {
+            textureContext.globalAlpha = 0.5;
+          }
+          textureContext.translate(drawX, drawY);
+          textureContext.scale(scale, scale);
+          textureContext.translate(-KABIBI_LOGO_VIEWBOX.x, -KABIBI_LOGO_VIEWBOX.y);
+          textureContext.lineJoin = 'round';
+          textureContext.lineWidth = 1;
+          textureContext.fillStyle = fg;
+          textureContext.strokeStyle = fg;
+          textureContext.fill(logoPaths.shell);
+          textureContext.stroke(logoPaths.shell);
+          textureContext.save();
+          textureContext.globalAlpha *= 0.85;
+          for (const band of logoPaths.bands) {
+            textureContext.fillStyle = band.color;
+            textureContext.fill(band.path);
+            textureContext.stroke(band.path);
+          }
+          textureContext.restore();
+          textureContext.stroke(logoPaths.shell);
+          textureContext.restore();
+        }
+      }
+    }
+
     function drawWarmTerminalImage(viewport, targetWidth, targetHeight) {
       textureContext.save();
       textureContext.filter = 'sepia(40%) saturate(1.05)';
@@ -1299,6 +1495,7 @@
         targetWidth,
         targetHeight
       );
+      drawShellLogos(viewport, targetWidth, targetHeight);
       textureContext.restore();
     }
 
