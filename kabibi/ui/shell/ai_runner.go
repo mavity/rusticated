@@ -354,6 +354,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 
 	var partEmb ai.PartEmbedder
 	var adaptiveEmb *adaptiveEmbedder
+	var reopenSessionEngine func(context.Context) (*ai.Engine, error)
 	if cfg.Mode == "local" {
 		embedPath, embedErr := assets.EnsureDefaultEmbeddingModel(ctx, opts)
 		if embedErr != nil {
@@ -377,6 +378,23 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			if openErr != nil {
 				return nil, openErr
 			}
+			return next, nil
+		}
+		reopenSessionEngine = func(context.Context) (*ai.Engine, error) {
+			r.lifeMu.Lock()
+			existing := r.engine
+			r.lifeMu.Unlock()
+			if existing != nil {
+				return existing, nil
+			}
+			next, openErr := reopenEngine()
+			if openErr != nil {
+				return nil, fmt.Errorf("reload local AI engine: %w", openErr)
+			}
+			r.lifeMu.Lock()
+			r.engine = next
+			r.lifecycleErr = nil
+			r.lifeMu.Unlock()
 			return next, nil
 		}
 		if residentErr != nil {
@@ -413,9 +431,10 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	compactionLimit := contextCompactionLimit(maxTokens)
 	sess, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
+		ReopenEngine:    reopenSessionEngine,
 		Embedder:        partEmb,
 		SystemMessage:   kabibiSystemMessage(envContext, r.systemContext),
-		Tools:           buildKabibiMainTools(engine, partEmb, r.execSess, compactionLimit, r.verbose, r.emitFeedback),
+		Tools:           buildKabibiMainTools(partEmb, r.execSess, compactionLimit, r.verbose, r.emitFeedback),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
 		OnContent:       r.emitContent,

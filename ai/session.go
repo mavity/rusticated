@@ -75,6 +75,20 @@ type BatchPartEmbedder interface {
 	EmbedBatchContext(ctx context.Context, parts []PromptPart) ([][]float32, error)
 }
 
+// BackgroundBatchPartEmbedder is an optional PartEmbedder extension that
+// manages resources (such as closing the chat engine on low-memory GPUs) once
+// across a background or inline embedding pass instead of per item.
+type BackgroundBatchPartEmbedder interface {
+	BeginBackgroundBatch(ctx context.Context) (EmbedBatchSession, error)
+}
+
+// EmbedBatchSession computes embeddings within a single resource-managed pass
+// and releases its resources on Close.
+type EmbedBatchSession interface {
+	EmbedContext(ctx context.Context, parts []PromptPart) ([]float32, error)
+	Close()
+}
+
 // PartEmbedderCacheIdentity identifies a model for caches that outlive one query.
 type PartEmbedderCacheIdentity interface {
 	CacheIdentity() string
@@ -319,6 +333,14 @@ func reflectFieldTypeSchema(t reflect.Type) map[string]any {
 	panic(fmt.Sprintf("ai: unsupported tool parameter type %v", t))
 }
 
+// Engine returns the Session's currently attached chat Engine, if any.
+func (s *Session) Engine() *Engine {
+	if s == nil {
+		return nil
+	}
+	return s.engine
+}
+
 // Embedder returns the Session's configured PartEmbedder, if any.
 func (s *Session) Embedder() PartEmbedder {
 	if s == nil {
@@ -330,6 +352,7 @@ func (s *Session) Embedder() PartEmbedder {
 // SessionConfig configures a high-level reflective chat session.
 type SessionConfig struct {
 	Engine          *Engine
+	ReopenEngine    func(ctx context.Context) (*Engine, error)
 	Embedder        PartEmbedder
 	SystemMessage   string
 	Tools           map[string]Tool
@@ -342,6 +365,7 @@ type SessionConfig struct {
 // Session tracks conversation state, history, and context compaction.
 type Session struct {
 	engine              *Engine
+	reopenEngine        func(ctx context.Context) (*Engine, error)
 	embedder            PartEmbedder
 	compressor          textCompressorFunc
 	conv                *Conversation
@@ -364,6 +388,8 @@ type Session struct {
 	shuttingDown             bool
 	shutdownConvCloseClaimed bool
 	turnWaiting              atomic.Bool
+	bgEmbedRunning           bool
+	bgEmbedDone              chan struct{}
 	embeddedUpTo             int
 	embedTrigger             chan struct{}
 	embedStop                chan struct{}
@@ -416,6 +442,63 @@ func (s *Session) endOperation(op *sessionOperation) {
 	close(op.done)
 }
 
+func (s *Session) beginForegroundOperation(ctx context.Context) (context.Context, *sessionOperation, error) {
+	opCtx, op, err := s.beginOperation(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.turnWaiting.Store(true)
+	s.operationMu.Lock()
+	var bgDone chan struct{}
+	if s.bgEmbedRunning {
+		bgDone = s.bgEmbedDone
+	}
+	s.operationMu.Unlock()
+
+	if bgDone != nil {
+		select {
+		case <-bgDone:
+		case <-opCtx.Done():
+			s.turnWaiting.Store(false)
+			s.endOperation(op)
+			return nil, nil, opCtx.Err()
+		}
+	}
+	s.turnWaiting.Store(false)
+	return opCtx, op, nil
+}
+
+func (s *Session) beginBackgroundEmbedding() (chan struct{}, bool) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if s.shuttingDown || s.activeOperation != nil || s.turnWaiting.Load() || s.bgEmbedRunning {
+		return nil, false
+	}
+	done := make(chan struct{})
+	s.bgEmbedRunning = true
+	s.bgEmbedDone = done
+	return done, true
+}
+
+func (s *Session) endBackgroundEmbedding(done chan struct{}) {
+	s.operationMu.Lock()
+	if s.bgEmbedDone == done {
+		s.bgEmbedRunning = false
+		s.bgEmbedDone = nil
+	}
+	s.operationMu.Unlock()
+	if done != nil {
+		close(done)
+	}
+}
+
+func (s *Session) isBackgroundEmbeddingActive() bool {
+	s.operationMu.Lock()
+	active := s.bgEmbedRunning
+	s.operationMu.Unlock()
+	return active
+}
+
 func (s *Session) operationFromContext(ctx context.Context) (*sessionOperation, bool) {
 	if ctx == nil {
 		return nil, false
@@ -434,6 +517,7 @@ func (s *Session) operationFromContext(ctx context.Context) (*sessionOperation, 
 func NewSession(cfg SessionConfig) (*Session, error) {
 	s := &Session{
 		engine:          cfg.Engine,
+		reopenEngine:    cfg.ReopenEngine,
 		embedder:        cfg.Embedder,
 		systemMessage:   cfg.SystemMessage,
 		compactionLimit: cfg.CompactionLimit,
@@ -775,50 +859,95 @@ func (s *Session) embedWorkerLoop() {
 }
 
 // processPendingEmbeddings embeds unembedded PromptPart items in CanonicalHistory
-// one by one while owning the session operation slot.
-// If flushAll is false, it yields immediately as soon as a user turn is waiting.
+// one by one without holding the foreground operation slot, yielding between
+// items if a foreground turn or shutdown is requested.
 func (s *Session) processPendingEmbeddings(parent context.Context, flushAll bool) error {
-	if !flushAll && s.turnWaiting.Load() {
+	if flushAll {
+		ctx, op, err := s.beginForegroundOperation(parent)
+		if err != nil {
+			return err
+		}
+		defer s.endOperation(op)
+		s.flushEmbeddingsInline(ctx)
 		return nil
 	}
-	ctx, op, err := s.beginOperation(parent)
-	if err != nil {
-		if !flushAll && errors.Is(err, ErrSessionBusy) {
+
+	bgDone, ok := s.beginBackgroundEmbedding()
+	if !ok {
+		return nil
+	}
+	defer s.endBackgroundEmbedding(bgDone)
+
+	if !s.hasPendingEmbeddings() {
+		return nil
+	}
+
+	ctx := parent
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var batch EmbedBatchSession
+	if batchEmbedder, ok := s.embedder.(BackgroundBatchPartEmbedder); ok {
+		var err error
+		batch, err = batchEmbedder.BeginBackgroundBatch(ctx)
+		if err != nil {
+			if s.verbose {
+				fmt.Fprintf(os.Stderr, "[embed] batch init error: %v\n", err)
+			}
 			return nil
 		}
-		return err
+		defer batch.Close()
 	}
-	defer s.endOperation(op)
 
 	for {
-		if !flushAll {
-			select {
-			case <-s.embedStop:
-				return nil
-			default:
-			}
-			if s.turnWaiting.Load() {
-				return nil
-			}
+		select {
+		case <-s.embedStop:
+			return nil
+		default:
 		}
-
-		s.historyMu.Lock()
-		for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
-			s.embeddedUpTo++
-		}
-		if s.embeddedUpTo >= len(s.CanonicalHistory) {
-			s.historyMu.Unlock()
+		if s.turnWaiting.Load() {
 			return nil
 		}
-		idx := s.embeddedUpTo
-		part := s.CanonicalHistory[idx]
-		s.historyMu.Unlock()
 
-		vec, err := EmbedWithContext(ctx, s.embedder, []PromptPart{part})
+		idx, part, ok := s.nextPendingEmbedding()
+		if !ok {
+			return nil
+		}
+
+		var vec []float32
+		var err error
+		if batch != nil {
+			vec, err = batch.EmbedContext(ctx, []PromptPart{part})
+		} else {
+			vec, err = EmbedWithContext(ctx, s.embedder, []PromptPart{part})
+		}
 		s.historyMu.Lock()
 		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
 	}
+}
+
+func (s *Session) hasPendingEmbeddings() bool {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
+		s.embeddedUpTo++
+	}
+	return s.embeddedUpTo < len(s.CanonicalHistory)
+}
+
+func (s *Session) nextPendingEmbedding() (int, PromptPart, bool) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
+		s.embeddedUpTo++
+	}
+	if s.embeddedUpTo >= len(s.CanonicalHistory) {
+		return 0, PromptPart{}, false
+	}
+	idx := s.embeddedUpTo
+	return idx, s.CanonicalHistory[idx], true
 }
 
 func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec []float32, err error) {
@@ -840,20 +969,34 @@ func (s *Session) flushEmbeddingsInline(ctx context.Context) {
 	if !s.hasEmbedder() {
 		return
 	}
-	for {
-		s.historyMu.Lock()
-		for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
-			s.embeddedUpTo++
-		}
-		if s.embeddedUpTo >= len(s.CanonicalHistory) {
-			s.historyMu.Unlock()
+	if !s.hasPendingEmbeddings() {
+		return
+	}
+	var batch EmbedBatchSession
+	if batchEmbedder, ok := s.embedder.(BackgroundBatchPartEmbedder); ok {
+		var err error
+		batch, err = batchEmbedder.BeginBackgroundBatch(ctx)
+		if err != nil {
+			if s.verbose {
+				fmt.Fprintf(os.Stderr, "[embed] inline batch init error: %v\n", err)
+			}
 			return
 		}
-		idx := s.embeddedUpTo
-		part := s.CanonicalHistory[idx]
-		s.historyMu.Unlock()
+		defer batch.Close()
+	}
+	for {
+		idx, part, ok := s.nextPendingEmbedding()
+		if !ok {
+			return
+		}
 
-		vec, err := EmbedWithContext(ctx, s.embedder, []PromptPart{part})
+		var vec []float32
+		var err error
+		if batch != nil {
+			vec, err = batch.EmbedContext(ctx, []PromptPart{part})
+		} else {
+			vec, err = EmbedWithContext(ctx, s.embedder, []PromptPart{part})
+		}
 		s.historyMu.Lock()
 		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
@@ -910,7 +1053,7 @@ func (s *Session) FlushEmbeddingsContext(ctx context.Context) error {
 }
 
 func (s *Session) Init() error {
-	_, op, err := s.beginOperation(context.Background())
+	_, op, err := s.beginForegroundOperation(context.Background())
 	if err != nil {
 		return err
 	}
@@ -969,7 +1112,7 @@ func (s *Session) ReplaceEngine(engine *Engine) error {
 	if s == nil || engine == nil {
 		return errors.New("replace session engine requires a non-nil session and engine")
 	}
-	_, op, err := s.beginOperation(context.Background())
+	_, op, err := s.beginForegroundOperation(context.Background())
 	if err != nil {
 		return err
 	}
@@ -978,13 +1121,30 @@ func (s *Session) ReplaceEngine(engine *Engine) error {
 }
 
 // ReplaceEngineDuringOperation replaces the engine while reusing an active
-// session operation, such as the embedding worker's engine fallback.
+// session operation, such as an in-turn embedding fallback.
 func (s *Session) ReplaceEngineDuringOperation(ctx context.Context, engine *Engine) error {
 	if s == nil || engine == nil {
 		return errors.New("replace session engine requires a non-nil session and engine")
 	}
 	if _, ok := s.operationFromContext(ctx); !ok {
 		return ErrSessionBusy
+	}
+	return s.replaceEngine(engine)
+}
+
+func (s *Session) ensureEngine(ctx context.Context) error {
+	if s.engine != nil {
+		return nil
+	}
+	if s.reopenEngine == nil {
+		return errors.New("ai: engine is not initialized")
+	}
+	engine, err := s.reopenEngine(ctx)
+	if err != nil {
+		return err
+	}
+	if engine == nil {
+		return errors.New("ai: engine reopen returned no engine")
 	}
 	return s.replaceEngine(engine)
 }
@@ -1008,7 +1168,7 @@ func (s *Session) SuspendConversation() error {
 	if s == nil {
 		return nil
 	}
-	_, op, err := s.beginOperation(context.Background())
+	_, op, err := s.beginForegroundOperation(context.Background())
 	if err != nil {
 		return err
 	}
@@ -1030,11 +1190,26 @@ func (s *Session) SuspendConversationDuringOperation(ctx context.Context) error 
 	return nil
 }
 
+// SuspendEngineForEmbedding closes the active conversation and clears s.engine
+// while either an active foreground operation or the background embedding worker
+// owns exclusive access.
+func (s *Session) SuspendEngineForEmbedding(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if _, ok := s.operationFromContext(ctx); !ok && !s.isBackgroundEmbeddingActive() {
+		return ErrSessionBusy
+	}
+	s.closeConv()
+	s.engine = nil
+	return nil
+}
+
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
-	_, op, err := s.beginOperation(context.Background())
+	_, op, err := s.beginForegroundOperation(context.Background())
 	if err != nil {
 		return err
 	}
@@ -1045,9 +1220,7 @@ func (s *Session) Close() error {
 
 // CompactContext projects canonical history into the compacted model context.
 func (s *Session) CompactContext(ctx context.Context) error {
-	s.turnWaiting.Store(true)
-	ctx, op, err := s.beginOperation(ctx)
-	s.turnWaiting.Store(false)
+	ctx, op, err := s.beginForegroundOperation(ctx)
 	if err != nil {
 		return err
 	}
@@ -1107,6 +1280,7 @@ func (s *Session) WaitShutdown(ctx context.Context) error {
 
 	s.operationMu.Lock()
 	op := s.activeOperation
+	embedDone := s.embedDone
 	s.operationMu.Unlock()
 	if op != nil {
 		select {
@@ -1115,9 +1289,9 @@ func (s *Session) WaitShutdown(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	if s.embedDone != nil {
+	if embedDone != nil {
 		select {
-		case <-s.embedDone:
+		case <-embedDone:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1298,9 +1472,7 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 }
 
 func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing TurnTiming) error {
-	s.turnWaiting.Store(true)
-	ctx, op, err := s.beginOperation(ctx)
-	s.turnWaiting.Store(false)
+	ctx, op, err := s.beginForegroundOperation(ctx)
 	if err != nil {
 		return err
 	}
@@ -1308,6 +1480,10 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 		s.endOperation(op)
 		s.triggerBackgroundEmbedding()
 	}()
+
+	if err := s.ensureEngine(ctx); err != nil {
+		return err
+	}
 
 	submittedAt := timing.SubmittedAt
 	if submittedAt.IsZero() {
@@ -2159,6 +2335,11 @@ func (s *Session) projectHistory(ctx context.Context, prior []PromptPart) []Prom
 func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
 	// Step 1: Synchronously flush any missing embeddings in CanonicalHistory.
 	s.flushEmbeddingsInline(ctx)
+	if s.engine == nil && s.reopenEngine != nil {
+		if err := s.ensureEngine(ctx); err != nil {
+			return err
+		}
+	}
 
 	before := historySize(s.CompactedHistory)
 	if feedback != nil {

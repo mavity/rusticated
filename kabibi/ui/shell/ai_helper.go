@@ -44,7 +44,6 @@ func lastHelperToolResponse(history []ai.PromptPart) *helperToolResponse {
 }
 
 func buildKabibiMainTools(
-	engine *ai.Engine,
 	embedder ai.PartEmbedder,
 	execSess *ExecutionSession,
 	compactionLimit int,
@@ -52,24 +51,27 @@ func buildKabibiMainTools(
 	onFeedback ai.LogFeedback,
 ) map[string]ai.Tool {
 	return map[string]ai.Tool{
-		"helper": newKabibiHelperTool(engine, embedder, execSess, compactionLimit, verbose, onFeedback),
+		"helper": newKabibiHelperTool(embedder, execSess, compactionLimit, verbose, onFeedback),
 	}
 }
 
 func newKabibiHelperTool(
-	engine *ai.Engine,
 	embedder ai.PartEmbedder,
 	execSess *ExecutionSession,
 	compactionLimit int,
 	verbose bool,
 	onFeedback ai.LogFeedback,
 ) ai.Tool {
-	return ai.NewSessionTool(func(ctx context.Context, _ *ai.ToolContext, in helperInput) (any, error) {
+	return ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in helperInput) (any, error) {
 		if strings.TrimSpace(in.Task) == "" {
 			return nil, errors.New("helper task is required")
 		}
 		if strings.TrimSpace(in.Description) == "" {
 			return nil, errors.New("helper description is required")
+		}
+		var engine *ai.Engine
+		if tc != nil && tc.Session != nil {
+			engine = tc.Session.Engine()
 		}
 		if engine == nil {
 			return nil, errors.New("helper engine is not initialized")

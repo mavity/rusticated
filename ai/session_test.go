@@ -1509,3 +1509,472 @@ func TestSessionReturnsToolErrorsToModel(t *testing.T) {
 		})
 	}
 }
+
+type blockingSequenceEmbedder struct {
+	mu      sync.Mutex
+	started chan string
+	release chan struct{}
+	calls   []string
+}
+
+func (b *blockingSequenceEmbedder) Embed(parts []PromptPart) ([]float32, error) {
+	text := ""
+	if len(parts) > 0 {
+		text = parts[0].Text
+	}
+	if b.started != nil {
+		b.started <- text
+	}
+	if b.release != nil {
+		<-b.release
+	}
+	b.mu.Lock()
+	b.calls = append(b.calls, text)
+	b.mu.Unlock()
+	return []float32{1, float32(len(text))}, nil
+}
+
+func (b *blockingSequenceEmbedder) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.calls)
+}
+
+type sequentialBatchMock struct {
+	mu           sync.Mutex
+	session      *Session
+	beginCalls   int
+	closeCalls   int
+	embedCalls   []string
+	firstStarted chan string
+	releaseFirst chan struct{}
+	blockFirst   bool
+}
+
+func (m *sequentialBatchMock) Embed(parts []PromptPart) ([]float32, error) {
+	text := ""
+	if len(parts) > 0 {
+		text = parts[0].Text
+	}
+	m.mu.Lock()
+	m.embedCalls = append(m.embedCalls, text)
+	m.mu.Unlock()
+	return []float32{1, float32(len(text))}, nil
+}
+
+func (m *sequentialBatchMock) BeginBackgroundBatch(ctx context.Context) (EmbedBatchSession, error) {
+	m.mu.Lock()
+	m.beginCalls++
+	m.mu.Unlock()
+	if m.session != nil {
+		if err := m.session.SuspendEngineForEmbedding(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return &sequentialBatchMockSession{parent: m}, nil
+}
+
+type sequentialBatchMockSession struct {
+	parent *sequentialBatchMock
+}
+
+func (s *sequentialBatchMockSession) EmbedContext(ctx context.Context, parts []PromptPart) ([]float32, error) {
+	text := ""
+	if len(parts) > 0 {
+		text = parts[0].Text
+	}
+	s.parent.mu.Lock()
+	shouldBlock := s.parent.blockFirst
+	s.parent.blockFirst = false
+	s.parent.mu.Unlock()
+	if shouldBlock {
+		if s.parent.firstStarted != nil {
+			s.parent.firstStarted <- text
+		}
+		if s.parent.releaseFirst != nil {
+			<-s.parent.releaseFirst
+		}
+	}
+	s.parent.mu.Lock()
+	s.parent.embedCalls = append(s.parent.embedCalls, text)
+	s.parent.mu.Unlock()
+	return []float32{1, float32(len(text))}, nil
+}
+
+func (s *sequentialBatchMockSession) Close() {
+	s.parent.mu.Lock()
+	s.parent.closeCalls++
+	s.parent.mu.Unlock()
+}
+
+func TestRunTurnIntrudesOnActiveBackgroundEmbeddingWithoutBusyError(t *testing.T) {
+	emb := &blockingSequenceEmbedder{
+		started: make(chan string, 8),
+		release: make(chan struct{}),
+	}
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "intruded answer"}}},
+		},
+	}
+	var out strings.Builder
+	s, err := NewSession(SessionConfig{
+		Engine:   &Engine{impl: &engineImpl{backend: backend}},
+		Embedder: emb,
+		OnContent: func(text string) {
+			out.WriteString(text)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+
+	s.appendHistory(
+		PromptPart{Role: RoleUser, Text: "p0"},
+		PromptPart{Role: RoleModel, Text: "p1"},
+		PromptPart{Role: RoleUser, Text: "p2"},
+	)
+	s.triggerBackgroundEmbedding()
+
+	select {
+	case got := <-emb.started:
+		if got != "p0" {
+			t.Fatalf("first embedded part = %q, want p0", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background embedder did not start")
+	}
+
+	turnDone := make(chan error, 1)
+	go func() {
+		turnDone <- s.RunTurn(context.Background(), "intruding prompt")
+	}()
+
+	// Wait until RunTurn has acquired the foreground slot and set turnWaiting.
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.turnWaiting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("RunTurn did not enter wait state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A second concurrent foreground turn must still fail fast with ErrSessionBusy.
+	if err := s.RunTurn(context.Background(), "second concurrent"); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("second concurrent RunTurn() error = %v, want %v", err, ErrSessionBusy)
+	}
+
+	// RunTurn must not have returned yet while p0 is still computing.
+	select {
+	case err := <-turnDone:
+		t.Fatalf("RunTurn returned early while single embedding was active: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	// Release p0; worker must yield before p1 so RunTurn executes immediately.
+	close(emb.release)
+	select {
+	case err := <-turnDone:
+		if err != nil {
+			t.Fatalf("intruding RunTurn() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTurn did not proceed after active embedding finished")
+	}
+
+	if out.String() != "intruded answer" {
+		t.Fatalf("spoken output = %q, want intruded answer", out.String())
+	}
+
+	// FlushEmbeddings waits for background worker to finish remaining items cleanly.
+	if err := s.FlushEmbeddings(); err != nil {
+		t.Fatalf("FlushEmbeddings() error = %v", err)
+	}
+	for i, part := range s.CanonicalHistory {
+		if len(part.Embedding) == 0 {
+			t.Fatalf("CanonicalHistory[%d] (%q) missing embedding", i, part.Text)
+		}
+	}
+}
+
+func TestBackgroundSequentialBatchClosesEngineOnceAndReopensOnTurn(t *testing.T) {
+	initialBackend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{},
+	}
+	reopenedBackend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "reopened answer"}}},
+		},
+	}
+	var reopenCalls atomic.Int32
+	mock := &sequentialBatchMock{
+		firstStarted: make(chan string, 4),
+		releaseFirst: make(chan struct{}),
+		blockFirst:   true,
+	}
+
+	var out strings.Builder
+	s, err := NewSession(SessionConfig{
+		Engine:   &Engine{impl: &engineImpl{backend: initialBackend}},
+		Embedder: mock,
+		ReopenEngine: func(context.Context) (*Engine, error) {
+			reopenCalls.Add(1)
+			return &Engine{impl: &engineImpl{backend: reopenedBackend}}, nil
+		},
+		OnContent: func(text string) {
+			out.WriteString(text)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.session = s
+	defer s.Shutdown()
+
+	s.appendHistory(
+		PromptPart{Role: RoleUser, Text: "item0"},
+		PromptPart{Role: RoleModel, Text: "item1"},
+		PromptPart{Role: RoleUser, Text: "item2"},
+	)
+	s.triggerBackgroundEmbedding()
+
+	select {
+	case got := <-mock.firstStarted:
+		if got != "item0" {
+			t.Fatalf("first sequential item = %q, want item0", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sequential background batch did not start")
+	}
+
+	if s.Engine() != nil {
+		t.Fatal("expected s.Engine() to be nil while sequential background batch is active")
+	}
+
+	turnDone := make(chan error, 1)
+	go func() {
+		turnDone <- s.RunTurn(context.Background(), "after close")
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.turnWaiting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("RunTurn did not signal turnWaiting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(mock.releaseFirst)
+	select {
+	case err := <-turnDone:
+		if err != nil {
+			t.Fatalf("RunTurn() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTurn did not complete after sequential batch yielded")
+	}
+
+	if reopenCalls.Load() != 1 {
+		t.Fatalf("reopenCalls = %d, want 1", reopenCalls.Load())
+	}
+	if out.String() != "reopened answer" {
+		t.Fatalf("spoken output = %q, want reopened answer", out.String())
+	}
+
+	if err := s.FlushEmbeddings(); err != nil {
+		t.Fatalf("FlushEmbeddings() error = %v", err)
+	}
+	for i, part := range s.CanonicalHistory {
+		if len(part.Embedding) == 0 {
+			t.Fatalf("CanonicalHistory[%d] missing embedding", i)
+		}
+	}
+}
+
+func TestRunTurnContextCanceledWhileWaitingForBackgroundEmbedding(t *testing.T) {
+	emb := &blockingSequenceEmbedder{
+		started: make(chan string, 4),
+		release: make(chan struct{}),
+	}
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "later answer"}}},
+		},
+	}
+	s, err := NewSession(SessionConfig{
+		Engine:   &Engine{impl: &engineImpl{backend: backend}},
+		Embedder: emb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+
+	s.appendHistory(PromptPart{Role: RoleUser, Text: "p0"})
+	s.triggerBackgroundEmbedding()
+
+	select {
+	case <-emb.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background embedding did not start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	turnDone := make(chan error, 1)
+	go func() {
+		turnDone <- s.RunTurn(ctx, "canceled while waiting")
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.turnWaiting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("RunTurn did not enter wait state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-turnDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunTurn() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTurn did not abort on context cancellation")
+	}
+
+	// Unblock p0 and ensure a subsequent RunTurn is not stuck with ErrSessionBusy.
+	close(emb.release)
+	if err := s.RunTurn(context.Background(), "subsequent turn"); err != nil {
+		t.Fatalf("subsequent RunTurn() error = %v", err)
+	}
+}
+
+func TestShutdownWhileTurnWaitsForBackgroundEmbedding(t *testing.T) {
+	emb := &blockingSequenceEmbedder{
+		started: make(chan string, 4),
+		release: make(chan struct{}),
+	}
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{},
+	}
+	s, err := NewSession(SessionConfig{
+		Engine:   &Engine{impl: &engineImpl{backend: backend}},
+		Embedder: emb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.appendHistory(PromptPart{Role: RoleUser, Text: "p0"})
+	s.triggerBackgroundEmbedding()
+
+	select {
+	case <-emb.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background embedding did not start")
+	}
+
+	turnDone := make(chan error, 1)
+	go func() {
+		turnDone <- s.RunTurn(context.Background(), "waiting during shutdown")
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.turnWaiting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("RunTurn did not enter wait state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	s.Shutdown()
+	select {
+	case err := <-turnDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunTurn() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTurn did not unblock on Shutdown")
+	}
+
+	close(emb.release)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.WaitShutdown(waitCtx); err != nil {
+		t.Fatalf("WaitShutdown() error = %v", err)
+	}
+}
+
+func TestCompactContextWaitsForBackgroundEmbeddingAndReopensClosedEngine(t *testing.T) {
+	emb := &blockingSequenceEmbedder{
+		started: make(chan string, 8),
+		release: make(chan struct{}),
+	}
+	reopenedBackend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{},
+	}
+	var reopenCalls atomic.Int32
+	s, err := NewSession(SessionConfig{
+		Embedder:        emb,
+		CompactionLimit: 4096,
+		ReopenEngine: func(context.Context) (*Engine, error) {
+			reopenCalls.Add(1)
+			return &Engine{impl: &engineImpl{backend: reopenedBackend}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.compressor = func(context.Context, string, string) (string, error) {
+		return "summary", nil
+	}
+	defer s.Shutdown()
+
+	s.appendHistory(
+		PromptPart{Role: RoleUser, Text: "old 1"},
+		PromptPart{Role: RoleModel, Text: "ans 1"},
+		PromptPart{Role: RoleUser, Text: "recent 1"},
+		PromptPart{Role: RoleModel, Text: "recent ans 1"},
+		PromptPart{Role: RoleUser, Text: "recent 2"},
+		PromptPart{Role: RoleModel, Text: "recent ans 2"},
+	)
+	s.triggerBackgroundEmbedding()
+
+	select {
+	case <-emb.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background embedding did not start")
+	}
+
+	compactDone := make(chan error, 1)
+	go func() {
+		compactDone <- s.CompactContext(context.Background())
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.turnWaiting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("CompactContext did not enter wait state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(emb.release)
+	select {
+	case err := <-compactDone:
+		if err != nil {
+			t.Fatalf("CompactContext() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CompactContext did not finish")
+	}
+
+	if reopenCalls.Load() != 1 {
+		t.Fatalf("reopenCalls = %d, want 1", reopenCalls.Load())
+	}
+	if s.Engine() == nil {
+		t.Fatal("expected s.Engine() to be reopened after CompactContext")
+	}
+}

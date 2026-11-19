@@ -19,7 +19,7 @@ import (
 )
 
 func TestKabibiMainToolsExposeOnlyHelper(t *testing.T) {
-	tools := buildKabibiMainTools(nil, nil, nil, 0, false, nil)
+	tools := buildKabibiMainTools(nil, nil, 0, false, nil)
 	if len(tools) != 1 {
 		t.Fatalf("main agent tool count = %d, want 1", len(tools))
 	}
@@ -140,8 +140,12 @@ func TestKabibiHelperUsesSemanticContentSearchForConceptDiscovery(t *testing.T) 
 	defer engine.Close()
 
 	embedder := &commandTestEmbedder{}
-	helper := newKabibiHelperTool(engine, embedder, execSess, 0, false, nil)
-	_, err = helper.ExecuteWithContext(context.Background(), &ai.ToolContext{}, ai.ToolCall{
+	parentSess, err := ai.NewSession(ai.SessionConfig{Engine: engine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := newKabibiHelperTool(embedder, execSess, 0, false, nil)
+	_, err = helper.ExecuteWithContext(context.Background(), &ai.ToolContext{Session: parentSess}, ai.ToolCall{
 		Name: "helper",
 		Arguments: map[string]any{
 			"task":        "Find the browser runtime initialization",
@@ -286,4 +290,117 @@ func TestEphemeralLineWriterRewritesAndWipesStatus(t *testing.T) {
 	if got := buf.String(); got != want {
 		t.Fatalf("EphemeralLineWriter output = %q, want %q", got, want)
 	}
+}
+
+func TestAdaptiveEmbedderBackgroundBatchAndHelperUsesLiveReopenedEngine(t *testing.T) {
+	execSess, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"find_files\",\"arguments\":\"{\\\"find_paths\\\":\\\"*.txt\\\",\\\"explanation\\\":\\\"check files\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"found files\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	makeEngine := func() *ai.Engine {
+		eng, err := ai.NewRemoteEngine(ai.RemoteEngineConfig{
+			Provider:   ai.RemoteOpenAI,
+			Model:      "test-model",
+			APIKey:     "test-token",
+			BaseURL:    server.URL + "/v1/chat/completions",
+			HTTPClient: server.Client(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return eng
+	}
+
+	runner := NewLazyAIRunner(execSess)
+	initialEngine := makeEngine()
+	runner.lifeMu.Lock()
+	runner.engine = initialEngine
+	runner.lifeMu.Unlock()
+
+	var reopenCount atomic.Int32
+	adaptive := newAdaptiveEmbedder(
+		runner,
+		nil,
+		func() (*ai.Embedder, error) {
+			return nil, errors.New("no native embedder in unit test")
+		},
+		func() (*ai.Engine, error) {
+			reopenCount.Add(1)
+			return makeEngine(), nil
+		},
+	)
+	sess, err := ai.NewSession(ai.SessionConfig{
+		Engine: initialEngine,
+		ReopenEngine: func(context.Context) (*ai.Engine, error) {
+			next := makeEngine()
+			runner.lifeMu.Lock()
+			runner.engine = next
+			runner.lifeMu.Unlock()
+			return next, nil
+		},
+		Embedder: adaptive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adaptive.BindSession(sess)
+	defer sess.Shutdown()
+
+	// Entering a sequential background batch via FlushEmbeddings closes initialEngine
+	// once and leaves runner.engine and sess.Engine() nil until a foreground turn reopens it.
+	sess.CanonicalHistory = []ai.PromptPart{{Role: ai.RoleUser, Text: "embed me"}}
+	if err := sess.FlushEmbeddings(); err != nil {
+		t.Fatalf("FlushEmbeddings() error = %v", err)
+	}
+	if sess.Engine() != nil {
+		t.Fatal("expected sess.Engine() to be nil after sequential embedding batch")
+	}
+	runner.lifeMu.Lock()
+	runnerEng := runner.engine
+	runner.lifeMu.Unlock()
+	if runnerEng != nil {
+		t.Fatal("expected runner.engine to be nil after entering sequential background batch")
+	}
+
+	// Simulate reopening the engine on a subsequent foreground turn, then verify
+	// newKabibiHelperTool picks up the live reopened engine via tc.Session.Engine().
+	reopened := makeEngine()
+	defer reopened.Close()
+	if err := sess.ReplaceEngine(reopened); err != nil {
+		t.Fatal(err)
+	}
+	if sess.Engine() != reopened {
+		t.Fatal("sess.Engine() did not update to reopened engine")
+	}
+
+	helper := newKabibiHelperTool(&commandTestEmbedder{}, execSess, 0, false, nil)
+	res, err := helper.ExecuteWithContext(context.Background(), &ai.ToolContext{Session: sess}, ai.ToolCall{
+		Name: "helper",
+		Arguments: map[string]any{
+			"task":        "List txt files",
+			"description": "verify live reopened engine is used",
+		},
+	})
+	if err != nil {
+		t.Fatalf("helper.ExecuteWithContext() error = %v", err)
+	}
+	outMap, ok := res.(helperResult)
+	if !ok || outMap.FinalText != "found files" {
+		t.Fatalf("helper result = %#v, want FinalText=%q", res, "found files")
+	}
+	_ = reopenCount
 }
