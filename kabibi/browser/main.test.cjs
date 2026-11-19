@@ -12,7 +12,11 @@ class FakeElement {
     this.tagName = tagName.toUpperCase();
     this.children = [];
     this.parentElement = null;
-    this.style = {};
+    this.style = {
+      setProperty(name, value) {
+        this[name] = String(value);
+      }
+    };
     this.dataset = {};
     this.attributes = {};
     this.className = '';
@@ -45,6 +49,7 @@ class FakeElement {
 
   setAttribute(name, value) {
     this.attributes[name] = value;
+    if (name === 'class') this.className = String(value);
   }
 
   getAttribute(name) {
@@ -87,6 +92,12 @@ class FakeDocument {
 
   createElement(tagName) {
     return new FakeElement(tagName);
+  }
+
+  createElementNS(namespace, tagName) {
+    const element = new FakeElement(tagName);
+    element.namespaceURI = namespace;
+    return element;
   }
 
   getElementById(id) {
@@ -894,7 +905,8 @@ test('super-demo Ctrl toggle modifies physical keys through the terminal handler
   });
   const controls = mounted.root.children.find((child) => child.className === 'kabibi-keyboard');
   const ctrl = controls.children[0].children[0];
-  assert.equal(ctrl.children[0].src, document.iconLink.href);
+  const ctrlDish = ctrl.children.find((child) => /kabibi-key-dish/.test(child.className));
+  assert.equal(ctrlDish.children[0].src, document.iconLink.href);
   ctrl.click();
 
   let prevented = false;
@@ -1063,11 +1075,52 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   const keyboard = context.KabibiBrowserSuperDemo.createVirtualKeyboard(document, terminal, root);
   const style = root.children.find((child) => child.tagName === 'STYLE');
   const grid = root.children.find((child) => child.className === 'kabibi-keyboard').children[0];
-  const buttons = new Map(grid.children.map((button) => [button.textContent, button]));
+  const buttons = new Map(grid.children.map((button) => [button.dataset.key, button]));
 
   assert.equal(grid.children.length, 19);
+  const narrowRowStart = Array.from(buttons.keys()).indexOf('F7');
+  assert.equal(narrowRowStart, 9);
+  assert.equal(buttons.size - narrowRowStart, 10);
   assert.match(style.textContent, /1\.55fr repeat\(18, minmax\(0, 1fr\)\)/);
-  assert.match(style.textContent, /1\.55fr repeat\(8, minmax\(0, 1fr\)\)/);
+  assert.match(style.textContent, /1\.55fr repeat\(9, minmax\(0, 1fr\)\)/);
+  assert.match(style.textContent, /kabibi-keyboard--narrow \.kabibi-key--row-start\s*\{\s*grid-column-start: 1;/);
+  assert.match(style.textContent, /\.facet-wall-left\s*\{\s*fill: var\(--key-facet-left\)/);
+  assert.match(style.textContent, /perspective\(240px\)\s*rotateX\(38deg\)/);
+  for (const button of grid.children) {
+    assert.ok(button.children.some((child) => child.className === 'kabibi-key-svg'));
+    assert.ok(button.children.some((child) => /kabibi-key-dish/.test(child.className)));
+  }
+  const normalCap = buttons.get('F5').children.find((child) => child.className === 'kabibi-key-svg');
+  const wideCap = buttons.get('Ctrl').children.find((child) => child.className === 'kabibi-key-svg');
+  assert.equal(normalCap.getAttribute('viewBox'), '0 0 100 100');
+  assert.equal(wideCap.getAttribute('viewBox'), '0 0 138 100');
+  assert.match(normalCap.children[0].getAttribute('d'), /Q/);
+  assert.equal(normalCap.children.filter((child) => /^facet-wall-/.test(child.className)).length, 4);
+  assert.match(buttons.get('F7').className, /kabibi-key--row-start/);
+  assert.equal(buttons.get('Ctrl').style['--deck-skew'], '9.00deg');
+  assert.equal(buttons.get('→').style['--deck-skew'], '-9.00deg');
+  for (const key of ['F1', 'F5', 'F9', '←']) {
+    assert.match(buttons.get(key).className, /kabibi-key--group-start/);
+  }
+  const captions = new Map(Array.from(buttons, ([key, button]) => {
+    const skirt = button.children.find((child) => child.className === 'kabibi-key-skirt');
+    return [key, skirt ? skirt.children[0] : undefined];
+  }));
+  for (const [key, caption] of [
+    ['Esc', 'Panel'],
+    ['Tab', '⇥'],
+    ['F2', 'Rename'],
+    ['F4', 'Edit'],
+    ['F5', 'Copy'],
+    ['F6', 'Move'],
+    ['F7', 'Mkdir'],
+    ['F8', 'Delete']
+  ]) {
+    assert.equal(captions.get(key).textContent, caption);
+  }
+  for (const key of ['Ctrl', 'F1', 'F3', 'F9', 'F10', 'F11', 'F12', '←', '↑', '↓', '→']) {
+    assert.equal(captions.get(key), undefined);
+  }
   const functionSequences = [
     '\x1bOP', '\x1bOQ', '\x1bOR', '\x1bOS',
     '\x1b[15~', '\x1b[17~', '\x1b[18~', '\x1b[19~',
@@ -1101,9 +1154,10 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   assert.deepEqual(terminal.inputs, expected);
 
   const controlButton = grid.children[0];
+  const controlDish = controlButton.children.find((child) => /kabibi-key-dish/.test(child.className));
   assert.equal(controlButton.getAttribute('aria-label'), 'Ctrl');
-  assert.equal(controlButton.children[0].src, 'kabibi/kabibi.svg');
-  assert.equal(controlButton.children[1].textContent, 'Ctrl');
+  assert.equal(controlDish.children[0].src, 'kabibi/kabibi.svg');
+  assert.equal(controlDish.children[1].textContent, 'Ctrl');
   assert.equal(controlButton.getAttribute('aria-pressed'), 'false');
   controlButton.click();
   assert.equal(controlButton.getAttribute('aria-pressed'), 'true');
@@ -1131,12 +1185,82 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
     stopPropagation() {}
   }), true);
 
+  keyboard.setReflectionLighting(-1.2, 1.4);
+  assert.equal(keyboard.element.style['--key-reflex-x'], '82.00%');
+  assert.equal(keyboard.element.style['--key-reflex-color'], 'rgba(160,176,194,0.032)');
+  assert.equal(keyboard.element.style['--chassis-light-x'], '16.00%');
+  assert.equal(keyboard.element.style['--chassis-edge-color'], 'rgba(160,176,194,0.100)');
+  const leftLitFacet = keyboard.element.style['--key-facet-left'];
+  const rightUnlitFacet = keyboard.element.style['--key-facet-right'];
+  assert.notEqual(leftLitFacet, rightUnlitFacet);
+  keyboard.setReflectionLighting(1.2, 1);
+  assert.equal(keyboard.element.style['--key-reflex-x'], '18.00%');
+  assert.equal(keyboard.element.style['--key-reflex-color'], 'rgba(160,176,194,0.045)');
+  assert.equal(keyboard.element.style['--chassis-light-x'], '84.00%');
+  assert.notEqual(
+    keyboard.element.style['--key-facet-right'],
+    keyboard.element.style['--key-facet-left']
+  );
+
   keyboard.setNarrow(true);
   assert.match(keyboard.element.className, /kabibi-keyboard--narrow/);
   keyboard.setNarrow(false);
   assert.doesNotMatch(keyboard.element.className, /kabibi-keyboard--narrow/);
   keyboard.dispose();
   assert.equal(root.children.length, 0);
+});
+
+test('physical screen keys depress without adding input and release on keyup or focus loss', () => {
+  const { document, context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const windowListeners = new Map();
+  document.defaultView = {
+    addEventListener(name, callback) { windowListeners.set(name, callback); },
+    removeEventListener(name) { windowListeners.delete(name); }
+  };
+  const terminal = new FakeTerminal({});
+  const keyboard = context.KabibiBrowserSuperDemo.createVirtualKeyboard(
+    document, terminal, document.createElement('div')
+  );
+  const buttons = new Map(keyboard.element.children[0].children.map(button => [button.dataset.key, button]));
+  const keydown = (key, code = key) => keyboard.handleKeyEvent({
+    type: 'keydown', key, code, preventDefault() {}
+  });
+  const keyup = (key, code = key) => document.listeners.get('keyup')({ key, code });
+  for (const [key, label] of [
+    ['Escape', 'Esc'], ['Tab', 'Tab'], ['Control', 'Ctrl'],
+    ['ArrowLeft', '←'], ['ArrowUp', '↑'], ['ArrowDown', '↓'], ['ArrowRight', '→'],
+    ...Array.from({ length: 12 }, (_, index) => [`F${index + 1}`, `F${index + 1}`])
+  ]) {
+    assert.equal(keydown(key), true);
+    keydown(key);
+    assert.equal(buttons.get(label).getAttribute('data-physical-pressed'), 'true');
+    keyup(key);
+    assert.equal(buttons.get(label).getAttribute('data-physical-pressed'), 'false');
+  }
+  assert.deepEqual(terminal.inputs, []);
+  assert.equal(keyboard.isControlActive(), false);
+  keydown('Control', 'ControlLeft');
+  keydown('Control', 'ControlRight');
+  keyup('Control', 'ControlLeft');
+  assert.equal(buttons.get('Ctrl').getAttribute('data-physical-pressed'), 'true');
+  keyup('Control', 'ControlRight');
+  assert.equal(buttons.get('Ctrl').getAttribute('data-physical-pressed'), 'false');
+
+  buttons.get('Ctrl').click();
+  keyboard.handleKeyEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
+  document.listeners.get('focusout')();
+  assert.equal(buttons.get('Esc').getAttribute('data-physical-pressed'), 'false');
+  assert.equal(keyboard.isControlActive(), true);
+  keydown('F5');
+  windowListeners.get('blur')();
+  assert.equal(buttons.get('F5').getAttribute('data-physical-pressed'), 'false');
+  keydown('F6');
+  keyboard.dispose();
+  assert.equal(buttons.get('F6').getAttribute('data-physical-pressed'), 'false');
+  assert.equal(document.listeners.has('keyup'), false);
+  assert.equal(document.listeners.has('focusout'), false);
+  assert.equal(windowListeners.has('blur'), false);
 });
 
 test('artifact startup routes output and queues terminal input until host readiness', async () => {
@@ -1330,22 +1454,22 @@ test('CRT image fitting preserves the source aspect ratio', () => {
   assert.ok(Math.abs(landscapeFit.y - 0.639) < 0.002);
 });
 
-test('CRT reflection oscillates left-right and back-forward over thirty seconds', () => {
+test('CRT reflection oscillates left-right and back-forward over five minutes', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
   const offset = context.KabibiBrowserSuperDemo.calculateReflectionOffset;
   const depth = context.KabibiBrowserSuperDemo.calculateReflectionDepth;
 
   assert.ok(Math.abs(offset(0)) < 1e-12);
-  assert.ok(Math.abs(offset(7500) - 1.2) < 1e-12);
-  assert.ok(Math.abs(offset(15000)) < 1e-12);
-  assert.ok(Math.abs(offset(22500) + 1.2) < 1e-12);
-  assert.ok(Math.abs(offset(30000)) < 1e-12);
+  assert.ok(Math.abs(offset(75000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(150000)) < 1e-12);
+  assert.ok(Math.abs(offset(225000) + 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(300000)) < 1e-12);
   assert.ok(Math.abs(depth(0) - 1.2) < 1e-12);
-  assert.ok(Math.abs(depth(7500) - 1) < 1e-12);
-  assert.ok(Math.abs(depth(15000) - 1.2) < 1e-12);
-  assert.ok(Math.abs(depth(22500) - 1.4) < 1e-12);
-  assert.ok(Math.abs(depth(30000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(75000) - 1) < 1e-12);
+  assert.ok(Math.abs(depth(150000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(225000) - 1.4) < 1e-12);
+  assert.ok(Math.abs(depth(300000) - 1.2) < 1e-12);
 });
 
 test('CRT power transitions use the requested startup and shutdown timing', () => {
@@ -1553,9 +1677,9 @@ test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction
   );
 
   // 3. Dual 3D pendulum light positions (left-close to right-far) and curved focal bounds
-  const lightLeft = superDemo.calculateLightPosition(22500, 2.72);
+  const lightLeft = superDemo.calculateLightPosition(225000, 2.72);
   const lightCenter = superDemo.calculateLightPosition(0, 2.72);
-  const lightRight = superDemo.calculateLightPosition(7500, 2.72);
+  const lightRight = superDemo.calculateLightPosition(75000, 2.72);
   assert.ok(lightRight.x > lightCenter.x && lightCenter.x > lightLeft.x);
   assert.ok(
     lightRight.z > lightLeft.z * 2.0,

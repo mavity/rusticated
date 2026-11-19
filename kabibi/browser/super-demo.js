@@ -2,25 +2,104 @@
   'use strict';
 
   const VIRTUAL_KEYS = [
-    { label: 'Esc', ariaLabel: 'Escape', sequence: '\x1b' },
-    { label: 'Tab', ariaLabel: 'Tab', sequence: '\t' },
-    { label: 'F1', ariaLabel: 'F1', sequence: '\x1bOP' },
-    { label: 'F2', ariaLabel: 'F2', sequence: '\x1bOQ' },
+    { label: 'Esc', ariaLabel: 'Escape', sequence: '\x1b', caption: 'Panel', captionColor: 'cyan' },
+    { label: 'Tab', ariaLabel: 'Tab', sequence: '\t', caption: '⇥' },
+    { label: 'F1', ariaLabel: 'F1', sequence: '\x1bOP', groupStart: true },
+    { label: 'F2', ariaLabel: 'F2', sequence: '\x1bOQ', caption: 'Rename', captionColor: 'cyan' },
     { label: 'F3', ariaLabel: 'F3', sequence: '\x1bOR' },
-    { label: 'F4', ariaLabel: 'F4', sequence: '\x1bOS' },
-    { label: 'F5', ariaLabel: 'F5', sequence: '\x1b[15~' },
-    { label: 'F6', ariaLabel: 'F6', sequence: '\x1b[17~' },
-    { label: 'F7', ariaLabel: 'F7', sequence: '\x1b[18~' },
-    { label: 'F8', ariaLabel: 'F8', sequence: '\x1b[19~' },
-    { label: 'F9', ariaLabel: 'F9', sequence: '\x1b[20~' },
+    { label: 'F4', ariaLabel: 'F4', sequence: '\x1bOS', caption: 'Edit', captionColor: 'muted' },
+    { label: 'F5', ariaLabel: 'F5', sequence: '\x1b[15~', caption: 'Copy', captionColor: 'green', groupStart: true },
+    { label: 'F6', ariaLabel: 'F6', sequence: '\x1b[17~', caption: 'Move', captionColor: 'amber' },
+    { label: 'F7', ariaLabel: 'F7', sequence: '\x1b[18~', caption: 'Mkdir', captionColor: 'muted', narrowRowStart: true },
+    { label: 'F8', ariaLabel: 'F8', sequence: '\x1b[19~', caption: 'Delete', captionColor: 'red' },
+    { label: 'F9', ariaLabel: 'F9', sequence: '\x1b[20~', groupStart: true },
     { label: 'F10', ariaLabel: 'F10', sequence: '\x1b[21~' },
     { label: 'F11', ariaLabel: 'F11', sequence: '\x1b[23~' },
     { label: 'F12', ariaLabel: 'F12', sequence: '\x1b[24~' },
-    { label: '←', ariaLabel: 'Arrow left', arrow: 'D' },
+    { label: '←', ariaLabel: 'Arrow left', arrow: 'D', groupStart: true },
     { label: '↑', ariaLabel: 'Arrow up', arrow: 'A' },
     { label: '↓', ariaLabel: 'Arrow down', arrow: 'B' },
     { label: '→', ariaLabel: 'Arrow right', arrow: 'C' }
   ];
+
+  function createKeyCapSvg(document, isWide) {
+    const width = isWide ? 138 : 100;
+    const height = 100;
+    const outerLeft = 1.5;
+    const outerRight = width - 1.5;
+    const innerLeft = isWide ? 8.5 : 9.5;
+    const innerRight = width - innerLeft;
+    const outerBottom = height - 1.5;
+    const innerBottom = 75.5;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'kabibi-key-svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+
+    const addPath = (className, d) => {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('class', className);
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    };
+    const addRidge = (className, x1, y1, x2, y2) => {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', className);
+      line.setAttribute('x1', x1);
+      line.setAttribute('y1', y1);
+      line.setAttribute('x2', x2);
+      line.setAttribute('y2', y2);
+      svg.appendChild(line);
+    };
+
+    addPath('facet-base-outline', `
+      M ${outerLeft + 1.6},1.5
+      Q ${width / 2},0.2 ${outerRight - 1.6},1.5
+      L ${outerRight},3.1
+      Q ${width - 0.1},52 ${outerRight},${outerBottom - 1.8}
+      L ${outerRight - 1.8},${outerBottom}
+      Q ${width / 2},99.9 ${outerLeft + 1.8},${outerBottom}
+      L ${outerLeft},${outerBottom - 1.8}
+      Q 0.1,52 ${outerLeft},3.1
+      Z
+    `);
+    addPath('facet-wall-top', `
+      M ${outerLeft + 1.6},1.5
+      Q ${width / 2},0.2 ${outerRight - 1.6},1.5
+      L ${innerRight},7.5
+      L ${innerLeft},7.5
+      Z
+    `);
+    addPath('facet-wall-left', `
+      M ${outerLeft},3.1
+      L ${innerLeft},7.5
+      L ${innerLeft},${innerBottom}
+      L ${outerLeft},${outerBottom - 1.8}
+      Q 0.1,52 ${outerLeft},3.1
+      Z
+    `);
+    addPath('facet-wall-right', `
+      M ${outerRight},3.1
+      Q ${width - 0.1},52 ${outerRight},${outerBottom - 1.8}
+      L ${innerRight},${innerBottom}
+      L ${innerRight},7.5
+      Z
+    `);
+    addPath('facet-wall-bottom', `
+      M ${innerLeft},${innerBottom}
+      L ${innerRight},${innerBottom}
+      L ${outerRight - 1.8},${outerBottom}
+      Q ${width / 2},99.9 ${outerLeft + 1.8},${outerBottom}
+      Z
+    `);
+    addRidge('ridge-top', innerLeft, 7.5, innerRight, 7.5);
+    addRidge('ridge-left', innerLeft, 7.5, innerLeft, innerBottom);
+    addRidge('ridge-right', innerRight, 7.5, innerRight, innerBottom);
+    addRidge('ridge-bottom', innerLeft, innerBottom, innerRight, innerBottom);
+    return svg;
+  }
 
   function createVirtualKeyboard(document, terminal, root) {
     if (!terminal || typeof terminal.input !== 'function') {
@@ -30,19 +109,43 @@
     const style = document.createElement('style');
     style.textContent = `
       .kabibi-keyboard {
+        --key-reflex-x: 50%;
+        --key-reflex-color: rgba(160,176,194,.035);
+        --chassis-light-x: 50%;
+        --chassis-edge-color: rgba(160,176,194,.1);
+        --key-facet-top: rgb(50,55,62);
+        --key-facet-left: rgb(20,23,27);
+        --key-facet-right: rgb(20,23,27);
+        position: relative;
         box-sizing: border-box;
         flex: 0 0 auto;
         width: 100%;
-        padding: clamp(4px, 0.8cqw, 10px) max(6px, env(safe-area-inset-right))
-          max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
-        border-top: 1px solid #4b525a;
-        background:
-          linear-gradient(180deg, rgba(255,255,255,.07), transparent 12px),
-          linear-gradient(180deg, #252a30 0%, #121519 46%, #080a0c 100%);
-        box-shadow: 0 -5px 18px rgba(0,0,0,.62), inset 0 1px 0 rgba(255,255,255,.12);
+        padding: clamp(4px, 0.7cqw, 10px) max(6px, env(safe-area-inset-right))
+          max(8px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+        border-top: 2px solid #2e2e2e;
+        background: repeating-linear-gradient(
+          180deg,
+          #282828 0px, #282828 1.5px,
+          #080a0c 1.5px, #080a0c 3px,
+          #101316 3px, #101316 3.5px
+        );
+        box-shadow: 0 -5px 18px rgba(0,0,0,.62);
         user-select: none;
         -webkit-user-select: none;
         touch-action: manipulation;
+      }
+      .kabibi-keyboard::before {
+        position: absolute;
+        top: -1px;
+        right: 0;
+        left: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, var(--chassis-edge-color), transparent);
+        background-size: 38% 100%;
+        background-position: var(--chassis-light-x) 0;
+        background-repeat: no-repeat;
+        content: '';
+        pointer-events: none;
       }
       .kabibi-keyboard-grid {
         display: grid;
@@ -51,45 +154,168 @@
         width: 100%;
       }
       .kabibi-keyboard--narrow .kabibi-keyboard-grid {
-        grid-template-columns: 1.55fr repeat(8, minmax(0, 1fr));
+        grid-template-columns: 1.55fr repeat(9, minmax(0, 1fr));
+      }
+      .kabibi-keyboard--narrow .kabibi-key--row-start {
+        grid-column-start: 1;
       }
       .kabibi-key {
         position: relative;
         box-sizing: border-box;
         min-width: 0;
         height: clamp(2.25rem, 6dvh, 3.5rem);
-        padding: 0 clamp(2px, 0.24cqw, 5px);
-        overflow: hidden;
-        border: 1px solid #080a0b;
-        border-radius: 2px;
-        color: #c4d2da;
-        background:
-          linear-gradient(180deg, #555d62 0%, #343a3e 12%, #202529 78%, #111518 100%);
-        box-shadow:
-          0 3px 0 #080a0b,
-          0 4px 4px rgba(0,0,0,.72),
-          inset 0 1px 0 rgba(255,255,255,.24),
-          inset 1px 0 0 rgba(255,255,255,.06),
-          inset 0 -2px 0 rgba(0,0,0,.7);
+        padding: 0;
+        overflow: visible;
+        border: 0;
+        color: #98a2aa;
+        background: transparent;
+        box-shadow: none;
         font: 600 clamp(.62rem, 1.35cqw, .95rem)/1 system-ui, sans-serif;
         text-shadow: 0 -1px 1px #000, 0 1px 0 rgba(255,255,255,.12);
         cursor: pointer;
         -webkit-tap-highlight-color: transparent;
       }
-      .kabibi-key::before {
+      .kabibi-key-svg {
         position: absolute;
-        inset: 2px 3px auto;
-        height: 1px;
-        background: rgba(255,255,255,.15);
+        z-index: 0;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        overflow: visible;
+        filter: drop-shadow(0 2px 2px rgba(0,0,0,.82));
+        pointer-events: none;
+      }
+      .facet-base-outline {
+        fill: #090a0d;
+        stroke: #050608;
+        stroke-width: .75;
+      }
+      .facet-wall-top { fill: var(--key-facet-top); }
+      .facet-wall-left { fill: var(--key-facet-left); }
+      .facet-wall-right { fill: var(--key-facet-right); }
+      .facet-wall-bottom { fill: #0b0e12; }
+      .ridge-top {
+        fill: none;
+        stroke: rgba(215,226,240,.19);
+        stroke-width: .95;
+      }
+      .ridge-left, .ridge-right {
+        fill: none;
+        stroke: rgba(215,226,240,.09);
+        stroke-width: .9;
+      }
+      .ridge-bottom {
+        fill: none;
+        stroke: rgba(5,6,8,.78);
+        stroke-width: 1;
+      }
+      .kabibi-key-dish {
+        position: absolute;
+        z-index: 1;
+        top: 7.5%;
+        right: 9.5%;
+        bottom: 24.5%;
+        left: 9.5%;
+        box-sizing: border-box;
+        overflow: hidden;
+        border: 0;
+        background:
+          linear-gradient(
+            90deg,
+            rgba(8,10,13,.35) 0%,
+            rgba(16,19,24,.10) 7%,
+            rgba(38,42,49,.06) calc(var(--key-reflex-x) - 22%),
+            var(--key-reflex-color) var(--key-reflex-x),
+            rgba(38,42,49,.06) calc(var(--key-reflex-x) + 22%),
+            rgba(16,19,24,.10) 93%,
+            rgba(8,10,13,.35) 100%
+          ),
+          linear-gradient(
+            180deg,
+            rgba(8,10,13,.20) 0%,
+            rgba(42,47,54,.025) 45%,
+            rgba(8,10,13,.24) 100%
+          ),
+          radial-gradient(rgba(255,255,255,.018) .65px, transparent 0),
+          #25292f;
+        background-size: 100% 100%, 100% 100%, 2.5px 2.5px, 100% 100%;
+        box-shadow: none;
+        transition: transform 35ms ease-out, filter 35ms ease-out;
+      }
+      .kabibi-key--ctrl .kabibi-key-dish {
+        right: 6.16%;
+        left: 6.16%;
+      }
+      .kabibi-key-label {
+        position: absolute;
+        z-index: 2;
+        top: 8%;
+        left: 11%;
+        right: 11%;
+        overflow: hidden;
+        color: #98a2aa;
+        text-align: left;
+        text-overflow: clip;
+        white-space: nowrap;
+      }
+      .kabibi-key--arrow .kabibi-key-label {
+        inset: 7.5% 9.5% 24.5%;
+        display: grid;
+        place-items: center;
+        font-size: clamp(.85rem, 1.6cqw, 1.15rem);
+      }
+      .kabibi-key-caption {
+        display: inline-block;
+        overflow: hidden;
+        font: 700 clamp(.4rem, .72cqw, .56rem)/1 system-ui, sans-serif;
+        letter-spacing: .01em;
+        text-align: center;
+        text-overflow: clip;
+        white-space: nowrap;
+        text-shadow: 0 1px 1px #000;
+        pointer-events: none;
+        transform-origin: center 55%;
+        transform:
+          perspective(240px)
+          rotateX(38deg)
+          scaleY(1.12)
+          skewX(var(--deck-skew));
+        transition: transform 35ms ease-out, opacity 35ms ease-out;
+      }
+      .kabibi-key-skirt {
+        position: absolute;
+        z-index: 1;
+        top: 75.5%;
+        right: 3.5%;
+        bottom: 1.5%;
+        left: 3.5%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        pointer-events: none;
+        transform-style: preserve-3d;
+      }
+      .kabibi-key-caption--cyan { color: #5eead4; }
+      .kabibi-key-caption--green { color: #6ee7b7; }
+      .kabibi-key-caption--amber { color: #fcd34d; }
+      .kabibi-key-caption--red { color: #fda4af; }
+      .kabibi-key-caption--muted { color: #94a3b8; }
+      .kabibi-key--group-start::after {
+        position: absolute;
+        z-index: 2;
+        top: 18%;
+        bottom: 24%;
+        left: 0;
+        width: 1px;
+        background: rgba(190,210,232,.28);
+        box-shadow: 1px 0 0 rgba(0,0,0,.55);
         content: '';
         pointer-events: none;
       }
       .kabibi-key--ctrl {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: clamp(2px, 0.3cqw, 6px);
-        color: #d6e0e5;
+        color: #98a2aa;
         letter-spacing: .03em;
       }
       .kabibi-key--ctrl img {
@@ -102,25 +328,50 @@
         object-fit: contain;
         pointer-events: none;
       }
-      .kabibi-key--ctrl span {
+      .kabibi-key-dish--ctrl {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: clamp(2px, 0.3cqw, 6px);
+        padding-bottom: 7px;
+      }
+      .kabibi-key--ctrl .kabibi-key-label {
+        position: static;
+        inset: auto;
         font-size: clamp(.58rem, 1.1cqw, .78rem);
       }
       .kabibi-key--ctrl[aria-pressed="true"] {
-        border-color: #9ab0bb;
         color: #f0c66c;
-        background: linear-gradient(180deg, #41494e 0%, #252b2f 80%, #161a1d 100%);
-        box-shadow:
-          0 1px 0 #080a0b,
-          inset 0 2px 4px rgba(0,0,0,.75),
-          inset 0 1px 0 rgba(255,255,255,.12);
         transform: translateY(2px);
       }
-      .kabibi-key:active {
-        transform: translateY(2px);
-        background: linear-gradient(180deg, #30363a 0%, #191e21 100%);
-        box-shadow:
-          0 1px 0 #080a0b,
-          inset 0 2px 4px rgba(0,0,0,.72);
+      .kabibi-key--ctrl[aria-pressed="true"] .kabibi-key-dish {
+        background:
+          linear-gradient(90deg, rgba(12,24,42,.35) 0%, rgba(120,185,255,.08) 50%, rgba(12,24,42,.35) 100%),
+          #223650;
+      }
+      .kabibi-key:active .kabibi-key-dish,
+      .kabibi-key[data-physical-pressed="true"] .kabibi-key-dish {
+        transform: translateY(1.6px) scaleX(.985) scaleY(.97);
+        filter: brightness(.9);
+      }
+      .kabibi-key:active .kabibi-key-svg,
+      .kabibi-key[data-physical-pressed="true"] .kabibi-key-svg {
+        transform: translateY(.6px);
+        filter: brightness(.84) drop-shadow(0 1px 1px rgba(0,0,0,.7));
+      }
+      .kabibi-key:active .kabibi-key-caption,
+      .kabibi-key[data-physical-pressed="true"] .kabibi-key-caption {
+        transform:
+          translateY(1px)
+          perspective(240px)
+          rotateX(42deg)
+          scaleY(1.08)
+          skewX(var(--deck-skew));
+        opacity: .78;
+      }
+      .kabibi-key:active,
+      .kabibi-key[data-physical-pressed="true"] {
+        transform: translateY(1.6px);
       }
       @supports not (height: 1dvh) {
         .kabibi-key { height: clamp(2.25rem, 6vh, 3.5rem); }
@@ -134,8 +385,10 @@
         .kabibi-key {
           font-size: clamp(.62rem, 1.35vw, .95rem);
         }
+        .kabibi-key--arrow .kabibi-key-label { font-size: .9rem; }
+        .kabibi-key-caption { font-size: .45rem; }
         .kabibi-key--ctrl img { width: clamp(1.05rem, 2vw, 1.7rem); height: clamp(1.05rem, 2vw, 1.7rem); }
-        .kabibi-key--ctrl span { font-size: clamp(.58rem, 1.1vw, .78rem); }
+        .kabibi-key--ctrl .kabibi-key-label { font-size: clamp(.58rem, 1.1vw, .78rem); }
       }
     `;
     const controls = document.createElement('div');
@@ -145,11 +398,29 @@
     const grid = document.createElement('div');
     grid.className = 'kabibi-keyboard-grid';
     controls.appendChild(grid);
+    const createSkirtCaption = (text, color) => {
+      const skirt = document.createElement('span');
+      skirt.className = 'kabibi-key-skirt';
+      skirt.setAttribute('aria-hidden', 'true');
+      const caption = document.createElement('span');
+      caption.className = `kabibi-key-caption${color ? ` kabibi-key-caption--${color}` : ''}`;
+      caption.textContent = text;
+      skirt.appendChild(caption);
+      return skirt;
+    };
 
     let controlActive = false;
     const controlButton = document.createElement('button');
     controlButton.type = 'button';
     controlButton.className = 'kabibi-key kabibi-key--ctrl';
+    controlButton.dataset.key = 'Ctrl';
+    const totalKeyCount = VIRTUAL_KEYS.length + 1;
+    const setDeckProjection = (button, index) => {
+      const deckOffset = totalKeyCount > 1 ? (index / (totalKeyCount - 1)) * 2 - 1 : 0;
+      button.style.setProperty('--deck-skew', `${(-deckOffset * 9).toFixed(2)}deg`);
+    };
+    setDeckProjection(controlButton, 0);
+    controlButton.appendChild(createKeyCapSvg(document, true));
     controlButton.setAttribute('aria-label', 'Ctrl');
     controlButton.setAttribute('aria-pressed', 'false');
     controlButton.title = 'Toggle Ctrl modifier';
@@ -161,10 +432,14 @@
     logo.alt = '';
     logo.setAttribute('aria-hidden', 'true');
     logo.draggable = false;
+    const controlDish = document.createElement('span');
+    controlDish.className = 'kabibi-key-dish kabibi-key-dish--ctrl';
     const controlLabel = document.createElement('span');
+    controlLabel.className = 'kabibi-key-label';
     controlLabel.textContent = 'Ctrl';
-    controlButton.appendChild(logo);
-    controlButton.appendChild(controlLabel);
+    controlDish.appendChild(logo);
+    controlDish.appendChild(controlLabel);
+    controlButton.appendChild(controlDish);
     controlButton.addEventListener('pointerdown', (event) => event.preventDefault());
     controlButton.addEventListener('contextmenu', (event) => event.preventDefault());
     controlButton.addEventListener('click', (event) => {
@@ -177,10 +452,27 @@
     for (const key of VIRTUAL_KEYS) {
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'kabibi-key';
-      button.textContent = key.label;
+      button.className = [
+        'kabibi-key',
+        key.arrow ? 'kabibi-key--arrow' : '',
+        key.groupStart ? 'kabibi-key--group-start' : '',
+        key.narrowRowStart ? 'kabibi-key--row-start' : ''
+      ].filter(Boolean).join(' ');
+      button.dataset.key = key.label;
+      setDeckProjection(button, grid.children.length);
+      button.appendChild(createKeyCapSvg(document, false));
       button.setAttribute('aria-label', key.ariaLabel);
       button.title = key.ariaLabel;
+      const dish = document.createElement('span');
+      dish.className = 'kabibi-key-dish';
+      const label = document.createElement('span');
+      label.className = 'kabibi-key-label';
+      label.textContent = key.label;
+      dish.appendChild(label);
+      button.appendChild(dish);
+      if (key.caption) {
+        button.appendChild(createSkirtCaption(key.caption, key.captionColor));
+      }
       button.addEventListener('pointerdown', (event) => event.preventDefault());
       button.addEventListener('contextmenu', (event) => event.preventDefault());
       button.addEventListener('click', (event) => {
@@ -202,12 +494,48 @@
 
     root.appendChild(style);
     root.appendChild(controls);
+    const physicalButtons = new Map(Array.from(grid.children, (button) => [button.dataset.key, button]));
+    const physicalKeyLabels = {
+      Escape: 'Esc',
+      Control: 'Ctrl',
+      ArrowLeft: '←',
+      ArrowUp: '↑',
+      ArrowDown: '↓',
+      ArrowRight: '→'
+    };
+    const pressedKeys = new Map();
+    const releasePhysicalKey = (event) => {
+      const code = event.code || event.key;
+      const button = pressedKeys.get(code);
+      if (!button) return;
+      pressedKeys.delete(code);
+      if (!Array.from(pressedKeys.values()).includes(button)) {
+        button.setAttribute('data-physical-pressed', 'false');
+      }
+    };
+    const releasePhysicalKeys = () => {
+      for (const button of pressedKeys.values()) {
+        button.setAttribute('data-physical-pressed', 'false');
+      }
+      pressedKeys.clear();
+    };
+    const window = document.defaultView || global;
+    document.addEventListener('keyup', releasePhysicalKey, true);
+    document.addEventListener('focusout', releasePhysicalKeys, true);
+    if (typeof window.addEventListener === 'function') window.addEventListener('blur', releasePhysicalKeys);
     return {
       element: controls,
       setNarrow(narrow) {
         controls.className = `kabibi-keyboard${narrow ? ' kabibi-keyboard--narrow' : ''}`;
       },
       handleKeyEvent(event) {
+        if (event && event.type === 'keydown' && !event.isComposing) {
+          const button = physicalButtons.get(physicalKeyLabels[event.key] || event.key);
+          if (button) {
+            pressedKeys.set(event.code || event.key, button);
+            button.setAttribute('data-physical-pressed', 'true');
+          }
+        }
         if (!controlActive || !event || event.type !== 'keydown' ||
             event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
           return true;
@@ -222,7 +550,26 @@
       isControlActive() {
         return controlActive;
       },
+      setReflectionLighting(offset, depthScale) {
+        const normalizedOffset = Math.max(-1, Math.min(1, offset / 1.2));
+        const inverseDepth = 1 / Math.max(depthScale, 1);
+        const facetColor = (base, range, facing) => `rgb(${base.map((value, index) =>
+          Math.round(value + range[index] * facing * inverseDepth)
+        ).join(',')})`;
+        const leftLight = Math.max(0, -normalizedOffset);
+        const rightLight = Math.max(0, normalizedOffset);
+        controls.style.setProperty('--key-reflex-x', `${(50 - normalizedOffset * 32).toFixed(2)}%`);
+        controls.style.setProperty('--key-reflex-color', `rgba(160,176,194,${(0.045 * inverseDepth).toFixed(3)})`);
+        controls.style.setProperty('--chassis-light-x', `${(50 + normalizedOffset * 34).toFixed(2)}%`);
+        controls.style.setProperty('--chassis-edge-color', `rgba(160,176,194,${(0.14 * inverseDepth).toFixed(3)})`);
+        controls.style.setProperty('--key-facet-left', facetColor([20, 23, 27], [28, 30, 32], leftLight));
+        controls.style.setProperty('--key-facet-right', facetColor([20, 23, 27], [28, 30, 32], rightLight));
+      },
       dispose() {
+        releasePhysicalKeys();
+        document.removeEventListener('keyup', releasePhysicalKey, true);
+        document.removeEventListener('focusout', releasePhysicalKeys, true);
+        if (typeof window.removeEventListener === 'function') window.removeEventListener('blur', releasePhysicalKeys);
         controlActive = false;
         controlButton.setAttribute('aria-pressed', 'false');
         controls.remove();
@@ -1029,6 +1376,10 @@
       const elapsed = now - reflectionAnimationStart;
       const powerAnimation = updatePowerAnimation(now);
       const lightPos = calculateLightPosition(elapsed, screenWidth);
+      keyboard.setReflectionLighting(
+        (lightPos.x - BASE_LIGHT_X) / screenWidth,
+        lightPos.depthScale
+      );
 
       // Pass 1: Render curved CRT surface, thick-glass refraction, Newtonian spectral dispersion,
       // sub-surface matte light illumination, internal glyph glint, and outer Fresnel into sceneFbo.
