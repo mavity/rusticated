@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,24 +43,23 @@ func (s *stringList) Set(value string) error {
 }
 
 type config struct {
-	executable      string
-	appArgs         stringList
-	workingDir      string
-	outputDir       string
-	wprPath         string
-	cols            int
-	rows            int
-	startupTimeout  time.Duration
-	idleDuration    time.Duration
-	slowText        string
-	slowInterval    time.Duration
-	fastText        string
-	fastInterval    time.Duration
-	editText        string
-	sampleInterval  time.Duration
-	threadInterval  time.Duration
-	drainDuration   time.Duration
-	exitGracePeriod time.Duration
+	executable     string
+	appArgs        stringList
+	workingDir     string
+	outputDir      string
+	cols           int
+	rows           int
+	startupTimeout time.Duration
+	idleDuration   time.Duration
+	slowText       string
+	slowInterval   time.Duration
+	typingSeed     int64
+	fastText       string
+	fastInterval   time.Duration
+	editText       string
+	sampleInterval time.Duration
+	threadInterval time.Duration
+	drainDuration  time.Duration
 }
 
 type event struct {
@@ -116,6 +116,12 @@ func (l *eventLog) setPhase(phase string) {
 	l.mu.Lock()
 	l.phase = phase
 	l.mu.Unlock()
+}
+
+func (l *eventLog) currentPhase() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.phase
 }
 
 func (l *eventLog) emit(kind, source, sourceAPI string, pid uint32, data map[string]any) error {
@@ -272,9 +278,11 @@ type processSampler struct {
 	lastThreadCount  uint32
 	first            *processSample
 	last             *processSample
+	samples          []processSample
 }
 
 type processSample struct {
+	Phase       string `json:"phase"`
 	AtElapsedNS int64  `json:"at_elapsed_ns"`
 	User100NS   uint64 `json:"user_time_100ns"`
 	Kernel100NS uint64 `json:"kernel_time_100ns"`
@@ -287,6 +295,19 @@ type processSample struct {
 	WriteBytes  uint64 `json:"write_bytes"`
 	Handles     uint32 `json:"handle_count"`
 	ThreadCount uint32 `json:"thread_count,omitempty"`
+}
+
+type processCounterDelta struct {
+	SampleIntervals      uint64  `json:"sample_intervals"`
+	UserCPUMS            float64 `json:"user_cpu_ms"`
+	KernelCPUMS          float64 `json:"kernel_cpu_ms"`
+	PageFaults           int64   `json:"page_faults"`
+	WorkingSetBytes      int64   `json:"working_set_bytes"`
+	PrivatePagefileBytes int64   `json:"private_pagefile_bytes"`
+	ReadOperations       int64   `json:"read_operations"`
+	WriteOperations      int64   `json:"write_operations"`
+	ReadBytes            int64   `json:"read_bytes"`
+	WriteBytes           int64   `json:"write_bytes"`
 }
 
 type runManifest struct {
@@ -304,30 +325,30 @@ type runManifest struct {
 	ParentProcessID  uint32            `json:"parent_process_id"`
 	PTY              map[string]any    `json:"pty"`
 	Startup          map[string]any    `json:"startup"`
+	TypingSeed       int64             `json:"typing_seed"`
 	Schedule         []map[string]any  `json:"schedule"`
 	Sampling         map[string]any    `json:"sampling"`
-	WPRProfiles      []string          `json:"wpr_profiles"`
-	WPRTrace         string            `json:"wpr_trace,omitempty"`
 	Artifacts        map[string]string `json:"artifacts"`
 }
 
 type runSummary struct {
-	SchemaVersion       int                `json:"schema_version"`
-	RunID               string             `json:"run_id"`
-	StartedAtUTC        time.Time          `json:"started_at_utc"`
-	FinishedAtUTC       time.Time          `json:"finished_at_utc"`
-	DurationNS          int64              `json:"duration_ns"`
-	ProcessID           uint32             `json:"process_id"`
-	ProcessExitCode     *int               `json:"process_exit_code,omitempty"`
-	ProcessExitError    string             `json:"process_exit_error,omitempty"`
-	PTYOutputBytes      uint64             `json:"pty_output_bytes"`
-	PTYOutputChunks     uint64             `json:"pty_output_chunks"`
-	ProcessSampleCount  uint64             `json:"process_sample_count"`
-	MaxThreadCount      uint32             `json:"max_thread_count"`
-	UniqueThreadIDsSeen int                `json:"unique_thread_ids_seen"`
-	ProcessCounterDelta map[string]any     `json:"process_counter_delta,omitempty"`
-	PTYByPhase          map[string]phaseIO `json:"pty_io_by_phase"`
-	Artifacts           map[string]string  `json:"artifacts"`
+	SchemaVersion       int                            `json:"schema_version"`
+	RunID               string                         `json:"run_id"`
+	StartedAtUTC        time.Time                      `json:"started_at_utc"`
+	FinishedAtUTC       time.Time                      `json:"finished_at_utc"`
+	DurationNS          int64                          `json:"duration_ns"`
+	ProcessID           uint32                         `json:"process_id"`
+	ProcessExitCode     *int                           `json:"process_exit_code,omitempty"`
+	ProcessExitError    string                         `json:"process_exit_error,omitempty"`
+	PTYOutputBytes      uint64                         `json:"pty_output_bytes"`
+	PTYOutputChunks     uint64                         `json:"pty_output_chunks"`
+	ProcessSampleCount  uint64                         `json:"process_sample_count"`
+	MaxThreadCount      uint32                         `json:"max_thread_count"`
+	UniqueThreadIDsSeen int                            `json:"unique_thread_ids_seen"`
+	ProcessCounterDelta map[string]any                 `json:"process_counter_delta,omitempty"`
+	PhaseCounterDeltas  map[string]processCounterDelta `json:"phase_counter_deltas"`
+	PTYByPhase          map[string]phaseIO             `json:"pty_io_by_phase"`
+	Artifacts           map[string]string              `json:"artifacts"`
 }
 
 var (
@@ -353,20 +374,19 @@ func parseFlags() config {
 	flag.Var(&cfg.appArgs, "arg", "Argument for the target executable; may be repeated")
 	flag.StringVar(&cfg.workingDir, "dir", filepath.Join("..", ".."), "Target working directory")
 	flag.StringVar(&cfg.outputDir, "out-dir", filepath.Join("..", "..", "target", "mohabbat-next-e2e"), "Directory for run artifacts")
-	flag.StringVar(&cfg.wprPath, "wpr", "", "Optional output ETL path; requires WPR-compatible permissions")
 	flag.IntVar(&cfg.cols, "cols", 120, "ConPTY columns")
 	flag.IntVar(&cfg.rows, "rows", 40, "ConPTY rows")
 	flag.DurationVar(&cfg.startupTimeout, "startup-timeout", 90*time.Second, "Maximum time to wait for the Kabibi prompt marker")
 	flag.DurationVar(&cfg.idleDuration, "idle", 2*time.Second, "Idle capture duration before typing")
 	flag.StringVar(&cfg.slowText, "slow-text", "slow-type-0123456789", "Text sent one key at a time during the slow burst")
-	flag.DurationVar(&cfg.slowInterval, "slow-interval", 200*time.Millisecond, "Interval between slow-burst key writes")
+	flag.DurationVar(&cfg.slowInterval, "slow-interval", 0, "Fixed interval between slow-burst keys; 0 uses human-like cadence")
+	flag.Int64Var(&cfg.typingSeed, "typing-seed", 1, "Seed for reproducible human-like typing cadence")
 	flag.StringVar(&cfg.fastText, "fast-text", "FAST0123456789abcdefghijklmnopqrstuvwxyz", "Text sent one key at a time during the fast burst")
 	flag.DurationVar(&cfg.fastInterval, "fast-interval", 20*time.Millisecond, "Interval between fast-burst key writes")
 	flag.StringVar(&cfg.editText, "edit-text", "EDIT-12345", "Text sent and then erased during the edit burst")
 	flag.DurationVar(&cfg.sampleInterval, "sample-interval", 100*time.Millisecond, "Process counter sample interval")
 	flag.DurationVar(&cfg.threadInterval, "thread-sample-interval", time.Second, "Thread ID/count enumeration interval")
 	flag.DurationVar(&cfg.drainDuration, "drain", time.Second, "Time to collect output after the final typing burst")
-	flag.DurationVar(&cfg.exitGracePeriod, "exit-grace", 4*time.Second, "Grace period after sending Ctrl-C")
 	flag.Parse()
 	return cfg
 }
@@ -488,26 +508,6 @@ func run(cfg config) (runErr error) {
 		return err
 	}
 
-	wprPath := ""
-	wprActive := false
-	if cfg.wprPath != "" {
-		wprPath, err = filepath.Abs(cfg.wprPath)
-		if err != nil {
-			return fmt.Errorf("resolve WPR trace path: %w", err)
-		}
-		if err := startWPR(log, pid); err != nil {
-			return err
-		}
-		wprActive = true
-	}
-	defer func() {
-		if wprActive {
-			if stopErr := stopWPR(log, pid, wprPath); stopErr != nil && runErr == nil {
-				runErr = stopErr
-			}
-		}
-	}()
-
 	sampler, err := newProcessSampler(pid, log)
 	if err != nil {
 		return err
@@ -515,16 +515,14 @@ func run(cfg config) (runErr error) {
 	sampler.threadInterval = cfg.threadInterval
 	defer windows.CloseHandle(sampler.handle)
 
-	manifest := makeManifest(runID, startedAt, executable, executableHash, executableInfo.Size(), cfg, workDir, pid, wprPath, eventsPath, summaryPath)
+	manifest := makeManifest(runID, startedAt, executable, executableHash, executableInfo.Size(), cfg, workDir, pid, eventsPath, summaryPath)
 	if err := writeJSON(manifestPath, manifest); err != nil {
 		return err
 	}
 
 	captureStart := time.Now()
 	log.setPhase("capture.idle")
-	if err := log.emit("capture.started", "harness", "capture phase boundary", pid, map[string]any{
-		"wpr_enabled": cfg.wprPath != "",
-	}); err != nil {
+	if err := log.emit("capture.started", "harness", "capture phase boundary", pid, nil); err != nil {
 		return err
 	}
 	stopSampling := make(chan struct{})
@@ -549,10 +547,12 @@ func run(cfg config) (runErr error) {
 
 	if err := phaseMarker(log, pid, "typing.slow", "started", map[string]any{
 		"input_bytes": len(cfg.slowText), "input_interval_ns": cfg.slowInterval.Nanoseconds(),
+		"typing_model": typingModel(cfg.slowInterval),
 	}); err != nil {
 		return err
 	}
-	if err := sendText(terminal, log, pid, "typing.slow", cfg.slowText, cfg.slowInterval, processState); err != nil {
+	typingRNG := rand.New(rand.NewSource(cfg.typingSeed))
+	if err := sendText(terminal, log, pid, "typing.slow", cfg.slowText, cfg.slowInterval, typingRNG, processState); err != nil {
 		return err
 	}
 	if err := phaseMarker(log, pid, "typing.slow", "finished", map[string]any{"input_bytes": len(cfg.slowText)}); err != nil {
@@ -572,7 +572,7 @@ func run(cfg config) (runErr error) {
 	}); err != nil {
 		return err
 	}
-	if err := sendText(terminal, log, pid, "typing.fast", cfg.fastText, cfg.fastInterval, processState); err != nil {
+	if err := sendText(terminal, log, pid, "typing.fast", cfg.fastText, cfg.fastInterval, typingRNG, processState); err != nil {
 		return err
 	}
 	if err := phaseMarker(log, pid, "typing.fast", "finished", map[string]any{"input_bytes": len(cfg.fastText)}); err != nil {
@@ -592,12 +592,21 @@ func run(cfg config) (runErr error) {
 	}); err != nil {
 		return err
 	}
-	if err := sendText(terminal, log, pid, "typing.edit", cfg.editText, 0, processState); err != nil {
+	if err := sendText(terminal, log, pid, "typing.edit", cfg.editText, 0, typingRNG, processState); err != nil {
 		return err
 	}
 	for i := 0; i < len(cfg.editText); i++ {
+		previous := byte(0x7f)
+		if i == 0 {
+			previous = cfg.editText[len(cfg.editText)-1]
+		}
+		delay := humanKeyDelay(previous, 0x7f, typingRNG)
+		if err := sleepUntilExit(delay, processState); err != nil {
+			return err
+		}
 		if err := sendInput(terminal, log, pid, "typing.edit", []byte{0x7f}, map[string]any{
 			"key_name": "DEL", "edit_index": i, "purpose": "erase edit burst text",
+			"delay_before_ns": delay.Nanoseconds(), "typing_model": "human-like-qwerty-cadence",
 		}); err != nil {
 			return err
 		}
@@ -628,35 +637,23 @@ func run(cfg config) (runErr error) {
 	<-samplingDone
 	samplingStopped = true
 
-	if cfg.wprPath != "" {
-		if err := stopWPR(log, pid, wprPath); err != nil {
-			return err
-		}
-		wprActive = false
-	}
-
 	log.setPhase("shutdown")
-	if err := sendInput(terminal, log, pid, "shutdown", []byte{0x03}, map[string]any{
-		"key_name": "CTRL_C", "purpose": "request clean process shutdown after capture",
-	}); err != nil {
-		return fmt.Errorf("send Ctrl-C to target: %w", err)
-	}
 	var result waitResult
 	exited := false
 	select {
 	case <-processState.done:
 		result = processState.result
 		exited = true
-	case <-time.After(cfg.exitGracePeriod):
+	default:
 	}
 	if !exited {
-		if err := log.emit("process.kill_requested", "harness", "os.Process.Kill", pid, map[string]any{
-			"reason": "process did not exit within configured Ctrl-C grace period",
+		if err := log.emit("process.terminate_requested", "harness", "os.Process.Kill", pid, map[string]any{
+			"reason": "terminate target after completing the capture",
 		}); err != nil {
 			return err
 		}
 		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			return fmt.Errorf("terminate target after shutdown timeout: %w", err)
+			return fmt.Errorf("terminate target after capture: %w", err)
 		}
 		<-processState.done
 		result = processState.result
@@ -693,9 +690,6 @@ func run(cfg config) (runErr error) {
 	fmt.Printf("Completed capture: %s\n", runDir)
 	fmt.Printf("PTY output: %d bytes in %d chunks; process samples: %d; max threads: %d\n",
 		summary.PTYOutputBytes, summary.PTYOutputChunks, summary.ProcessSampleCount, summary.MaxThreadCount)
-	if cfg.wprPath != "" {
-		fmt.Printf("WPR trace: %s\n", wprPath)
-	}
 	return result.err
 }
 
@@ -707,8 +701,8 @@ func validateConfig(cfg config) error {
 		return fmt.Errorf("startup timeout must be positive")
 	}
 	if cfg.idleDuration < 0 || cfg.slowInterval < 0 || cfg.fastInterval < 0 ||
-		cfg.sampleInterval <= 0 || cfg.threadInterval <= 0 || cfg.drainDuration < 0 || cfg.exitGracePeriod <= 0 {
-		return fmt.Errorf("durations must be nonnegative and sample interval/exit grace must be positive")
+		cfg.sampleInterval <= 0 || cfg.threadInterval <= 0 || cfg.drainDuration < 0 {
+		return fmt.Errorf("durations must be nonnegative and sample intervals must be positive")
 	}
 	for label, text := range map[string]string{
 		"slow-text": cfg.slowText, "fast-text": cfg.fastText, "edit-text": cfg.editText,
@@ -789,10 +783,14 @@ func waitForPrompt(state *outputReader, process *processWait, timeout time.Durat
 	}
 }
 
-func sendText(terminal pty.PTY, log *eventLog, pid uint32, phase, text string, interval time.Duration, process *processWait) error {
+func sendText(terminal pty.PTY, log *eventLog, pid uint32, phase, text string, interval time.Duration, rng *rand.Rand, process *processWait) error {
 	log.setPhase(phase)
 	for i := 0; i < len(text); i++ {
-		if err := sleepUntilExit(interval, process); err != nil {
+		delay := interval
+		if interval == 0 && i > 0 {
+			delay = humanKeyDelay(text[i-1], text[i], rng)
+		}
+		if err := sleepUntilExit(delay, process); err != nil {
 			return err
 		}
 		char := []byte{text[i]}
@@ -801,6 +799,8 @@ func sendText(terminal pty.PTY, log *eventLog, pid uint32, phase, text string, i
 			"key_byte":                              text[i],
 			"key_name":                              printableKey(text[i]),
 			"burst_length_bytes":                    len(text),
+			"delay_before_ns":                       delay.Nanoseconds(),
+			"typing_model":                          typingModel(interval),
 			"write_completion_is_not_a_screen_echo": true,
 		}); err != nil {
 			return err
@@ -845,6 +845,63 @@ func sendInput(terminal pty.PTY, log *eventLog, pid uint32, phase string, data [
 	return nil
 }
 
+func typingModel(interval time.Duration) string {
+	if interval > 0 {
+		return "fixed-interval"
+	}
+	return "human-like-qwerty-cadence"
+}
+
+func humanKeyDelay(previous, current byte, rng *rand.Rand) time.Duration {
+	switch {
+	case previous == 0x7f:
+		return randomDuration(rng, 75*time.Millisecond, 140*time.Millisecond)
+	case current == 0x7f:
+		return randomDuration(rng, 90*time.Millisecond, 170*time.Millisecond)
+	case strings.ContainsRune(".,?!;:", rune(previous)):
+		return randomDuration(rng, 220*time.Millisecond, 550*time.Millisecond)
+	case previous == ' ':
+		return randomDuration(rng, 80*time.Millisecond, 150*time.Millisecond)
+	}
+
+	previousHand, previousOK := qwertyHand(previous)
+	currentHand, currentOK := qwertyHand(current)
+	if previousOK && currentOK && previousHand != currentHand {
+		return randomDuration(rng, 45*time.Millisecond, 95*time.Millisecond)
+	}
+	return randomDuration(rng, 110*time.Millisecond, 210*time.Millisecond)
+}
+
+func randomDuration(rng *rand.Rand, min, max time.Duration) time.Duration {
+	return min + time.Duration(rng.Int63n(int64(max-min)+1))
+}
+
+func qwertyHand(key byte) (hand byte, ok bool) {
+	if key >= 'A' && key <= 'Z' {
+		key += 'a' - 'A'
+	}
+	switch {
+	case strings.ContainsRune("qaz1", rune(key)):
+		return 0, true
+	case strings.ContainsRune("wsx2", rune(key)):
+		return 0, true
+	case strings.ContainsRune("edc3", rune(key)):
+		return 0, true
+	case strings.ContainsRune("rfvtgb45", rune(key)):
+		return 0, true
+	case strings.ContainsRune("yhnujm67", rune(key)):
+		return 1, true
+	case strings.ContainsRune("ik8", rune(key)):
+		return 1, true
+	case strings.ContainsRune("ol9", rune(key)):
+		return 1, true
+	case strings.ContainsRune("p;0-=[]'\\/", rune(key)):
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
 var inputSequence uint64
 
 func printableKey(b byte) string {
@@ -867,48 +924,6 @@ func sleepUntilExit(duration time.Duration, process *processWait) error {
 		result := process.result
 		return fmt.Errorf("target exited during capture (state=%v, error=%v)", result.state, result.err)
 	}
-}
-
-func startWPR(log *eventLog, pid uint32) error {
-	profiles := []string{"GeneralProfile", "CPU", "VirtualAllocation"}
-	args := []string{"-start"}
-	args = append(args, profiles[0])
-	for _, profile := range profiles[1:] {
-		args = append(args, "-start", profile)
-	}
-	args = append(args, "-filemode")
-	cmd := exec.Command("wpr.exe", args...)
-	output, err := cmd.CombinedOutput()
-	_ = log.emit("wpr.start", "wpr", "wpr.exe "+strings.Join(args, " "), pid, map[string]any{
-		"profiles": profiles, "exit_error": errorString(err), "output": string(output),
-	})
-	if err != nil {
-		return fmt.Errorf("start WPR capture (profiles %s): %w: %s", strings.Join(profiles, ", "), err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func stopWPR(log *eventLog, pid uint32, outputPath string) error {
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return fmt.Errorf("create WPR output directory: %w", err)
-	}
-	args := []string{"-stop", outputPath, "Mohabbat-Next Kabibi PTY typing capture"}
-	cmd := exec.Command("wpr.exe", args...)
-	output, err := cmd.CombinedOutput()
-	_ = log.emit("wpr.stop", "wpr", "wpr.exe "+strings.Join(args, " "), pid, map[string]any{
-		"trace_path": outputPath, "exit_error": errorString(err), "output": string(output),
-	})
-	if err != nil {
-		return fmt.Errorf("stop WPR capture: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func errorString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 func newProcessSampler(pid uint32, log *eventLog) (*processSampler, error) {
@@ -958,17 +973,12 @@ func (s *processSampler) sample() {
 	start := time.Now()
 	data := map[string]any{
 		"sample_started_utc": start.UTC(),
-		"source_details": map[string]string{
-			"cpu":         "kernel32!GetProcessTimes; cumulative 100-ns FILETIME values",
-			"memory":      "psapi!GetProcessMemoryInfo; working set and PagefileUsage/private commit",
-			"page_faults": "psapi!GetProcessMemoryInfo; cumulative process page-fault count",
-			"io":          "kernel32!GetProcessIoCounters; cumulative operation and byte counts",
-			"handles":     "kernel32!GetProcessHandleCount; process handle count",
-			"threads":     "kernel32!CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD); filtered by owner PID",
-		},
 	}
 	var errorsByCounter []string
-	sample := processSample{AtElapsedNS: time.Since(s.log.start).Nanoseconds()}
+	sample := processSample{
+		Phase:       s.log.currentPhase(),
+		AtElapsedNS: time.Since(s.log.start).Nanoseconds(),
+	}
 
 	var creation, exit, kernel, user windows.Filetime
 	r1, _, callErr := procGetProcessTimes.Call(uintptr(s.handle), uintptr(unsafe.Pointer(&creation)),
@@ -1048,6 +1058,7 @@ func (s *processSampler) sample() {
 	sample.AtElapsedNS = time.Since(s.log.start).Nanoseconds()
 	data["sample_completed_utc"] = time.Now().UTC()
 	data["sample_duration_ns"] = time.Since(start).Nanoseconds()
+	data["sample_phase"] = sample.Phase
 	data["sample"] = sample
 	if len(errorsByCounter) > 0 {
 		data["counter_errors"] = errorsByCounter
@@ -1058,10 +1069,41 @@ func (s *processSampler) sample() {
 	}
 	last := sample
 	s.last = &last
+	s.samples = append(s.samples, sample)
 	if err := s.log.emit("process.sample", "windows.process", "Win32 process counters", s.pid, data); err != nil {
 		_ = s.log.emit("harness.error", "harness", "eventLog.emit", s.pid, map[string]any{"error": err.Error()})
 	}
 	s.sampleCount++
+}
+
+func (s *processSampler) phaseCounterDeltas() map[string]processCounterDelta {
+	deltas := make(map[string]processCounterDelta)
+	for i := 1; i < len(s.samples); i++ {
+		previous, current := s.samples[i-1], s.samples[i]
+		if previous.Phase != current.Phase {
+			continue
+		}
+		delta := deltas[current.Phase]
+		delta.SampleIntervals++
+		delta.UserCPUMS += nonnegativeCounterDelta(current.User100NS, previous.User100NS) / 10000
+		delta.KernelCPUMS += nonnegativeCounterDelta(current.Kernel100NS, previous.Kernel100NS) / 10000
+		delta.PageFaults += int64(current.PageFaults) - int64(previous.PageFaults)
+		delta.WorkingSetBytes += int64(current.WorkingSet) - int64(previous.WorkingSet)
+		delta.PrivatePagefileBytes += int64(current.Pagefile) - int64(previous.Pagefile)
+		delta.ReadOperations += int64(current.ReadOps) - int64(previous.ReadOps)
+		delta.WriteOperations += int64(current.WriteOps) - int64(previous.WriteOps)
+		delta.ReadBytes += int64(current.ReadBytes) - int64(previous.ReadBytes)
+		delta.WriteBytes += int64(current.WriteBytes) - int64(previous.WriteBytes)
+		deltas[current.Phase] = delta
+	}
+	return deltas
+}
+
+func nonnegativeCounterDelta(current, previous uint64) float64 {
+	if current < previous {
+		return 0
+	}
+	return float64(current - previous)
 }
 
 func enumerateThreads(pid uint32) ([]uint32, error) {
@@ -1105,18 +1147,14 @@ func callError(err error) error {
 	return syscall.GetLastError()
 }
 
-func makeManifest(runID string, startedAt time.Time, executable, executableHash string, executableBytes int64, cfg config, workDir string, pid uint32, wprPath, eventsPath, summaryPath string) runManifest {
+func makeManifest(runID string, startedAt time.Time, executable, executableHash string, executableBytes int64, cfg config, workDir string, pid uint32, eventsPath, summaryPath string) runManifest {
 	parentPID := uint32(os.Getpid())
 	schedule := []map[string]any{
 		{"phase": "capture.idle", "duration_ns": cfg.idleDuration.Nanoseconds(), "purpose": "idle baseline before synthetic typing"},
-		{"phase": "typing.slow", "text": cfg.slowText, "input_interval_ns": cfg.slowInterval.Nanoseconds(), "purpose": "paced single-byte typing"},
+		{"phase": "typing.slow", "text": cfg.slowText, "input_interval_ns": cfg.slowInterval.Nanoseconds(), "typing_model": typingModel(cfg.slowInterval), "purpose": "paced single-byte typing"},
 		{"phase": "typing.fast", "text": cfg.fastText, "input_interval_ns": cfg.fastInterval.Nanoseconds(), "purpose": "rapid single-byte typing"},
-		{"phase": "typing.edit", "text": cfg.editText, "erase_byte": "0x7f", "purpose": "type then backspace a short string"},
+		{"phase": "typing.edit", "text": cfg.editText, "erase_byte": "0x7f", "typing_model": "human-like-qwerty-cadence", "purpose": "type then backspace a short string"},
 		{"phase": "capture.drain", "duration_ns": cfg.drainDuration.Nanoseconds(), "purpose": "observe completion/redraw backlog after final key"},
-	}
-	profiles := []string(nil)
-	if wprPath != "" {
-		profiles = []string{"GeneralProfile", "CPU", "VirtualAllocation"}
 	}
 	return runManifest{
 		SchemaVersion:    schemaVersion,
@@ -1146,7 +1184,8 @@ func makeManifest(runID string, startedAt time.Time, executable, executableHash 
 			"marker_source":        "UTF-8 bytes observed in ConPTY output",
 			"input_sent_before_it": false,
 		},
-		Schedule: schedule,
+		TypingSeed: cfg.typingSeed,
+		Schedule:   schedule,
 		Sampling: map[string]any{
 			"interval_ns": cfg.sampleInterval.Nanoseconds(),
 			"process_id":  pid,
@@ -1161,13 +1200,10 @@ func makeManifest(runID string, startedAt time.Time, executable, executableHash 
 			"thread_sample_interval_ns": cfg.threadInterval.Nanoseconds(),
 			"sampling_overhead_note":    "Process samples run in a harness goroutine; each record includes total query duration. Thread enumeration uses its own slower cadence and records its individual duration.",
 		},
-		WPRProfiles: profiles,
-		WPRTrace:    wprPath,
 		Artifacts: map[string]string{
 			"events_jsonl":  eventsPath,
 			"manifest_json": filepath.Join(filepath.Dir(eventsPath), "manifest.json"),
 			"summary_json":  summaryPath,
-			"wpr_etl":       wprPath,
 		},
 	}
 }
@@ -1183,6 +1219,7 @@ func makeSummary(runID string, startedAt time.Time, pid uint32, result waitResul
 		ProcessSampleCount:  sampler.sampleCount,
 		MaxThreadCount:      sampler.maxThreads,
 		UniqueThreadIDsSeen: len(sampler.seenThreadID),
+		PhaseCounterDeltas:  sampler.phaseCounterDeltas(),
 		PTYByPhase:          log.phaseIOSnapshot(),
 		Artifacts: map[string]string{
 			"events_jsonl":  eventsPath,

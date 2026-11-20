@@ -24,13 +24,9 @@ The harness is its own Go module so it can consume the existing `pty` module
 without changing the production builder's dependency graph.
 
 By default, the harness writes one run directory under
-`target/mohabbat-next-e2e/`. Use `-wpr <trace.etl>` to additionally collect
-Windows Performance Recorder data during the capture window. WPR starts after
-the prompt marker appears and stops after the typing/drain phases, before
-shutdown. It requests the installed `GeneralProfile`, `CPU`, and
-`VirtualAllocation` profiles. If WPR refuses the request (for example due to
-permissions or another active recording), the harness reports the command and
-does not silently continue as though an ETL had been collected.
+`target/mohabbat-next-e2e/`. It uses ordinary process-query APIs only: it does
+not start ETW/WPR or require elevated access. After the capture it terminates
+the target process rather than sending interactive shutdown keys.
 
 Important options:
 
@@ -40,42 +36,59 @@ Important options:
 | `-arg` | none | Target argument; repeat the flag to supply multiple arguments |
 | `-dir` | `..\..` | Target working directory |
 | `-out-dir` | `..\..\target\mohabbat-next-e2e` | Run artifact root |
-| `-wpr` | none | Optional WPR ETL output path |
 | `-cols`, `-rows` | `120`, `40` | ConPTY dimensions |
 | `-startup-timeout` | `90s` | Maximum wait for the prompt marker before failing |
 | `-idle` | `2s` | Idle period included in capture |
-| `-slow-text`, `-slow-interval` | `slow-type-0123456789`, `200ms` | Paced burst |
+| `-slow-text`, `-slow-interval` | `slow-type-0123456789`, human-like cadence | Paced burst; positive interval overrides cadence with a fixed delay |
+| `-typing-seed` | `1` | Seed for reproducible human-like inter-key delays |
 | `-fast-text`, `-fast-interval` | `FAST0123456789abcdefghijklmnopqrstuvwxyz`, `20ms` | Rapid burst |
 | `-edit-text` | `EDIT-12345` | Text to type and then erase with DEL bytes |
 | `-sample-interval` | `100ms` | Win32 process-counter sampling interval |
 | `-thread-sample-interval` | `1s` | Slower cadence for system-wide thread snapshot enumeration |
 | `-drain` | `1s` | Post-typing observation interval |
-| `-exit-grace` | `4s` | Grace period after the capture for Ctrl-C shutdown |
+
+The slow and edit bursts use timing ranges from the AI browser's documented
+human-like typing design: alternating-hand transitions are 45–95 ms,
+same-hand/unknown transitions are 110–210 ms, a word-start pause after spaces
+is 80–150 ms, and sentence punctuation adds a 220–550 ms pause before the next
+character. The
+edit burst also spaces its DEL bytes. These are delays between bytes written to
+ConPTY, not physical key-down/key-up events; the browser typing design is
+documentation only and has no implementation to reuse. The fast burst keeps
+its fixed interval for a controlled rapid-input comparison. A fixed seed makes
+the default slow/edit schedule repeatable.
 
 Each run contains:
 
 * `manifest.json`: exact executable path, SHA-256 and size, arguments, working
   directory, PID, host, PTY geometry/TERM, prompt marker and timeout, workload
-  schedule, sampling interval, metric list, WPR profile selection, and artifact
-  paths.
+  schedule and seed, sampling interval, metric list, and artifact paths.
 * `events.jsonl`: timestamped records with schema version, run ID, monotonically
   assigned record sequence, UTC timestamp, monotonic elapsed nanoseconds,
   phase, source, source API, PID, and event-specific data. PTY output and input
   bytes are preserved as base64; valid UTF-8 output also has a text field.
 * `summary.json`: process exit information, PTY byte/chunk totals by phase,
-  sample count, maximum/unique observed thread counts, and counter deltas from
-  the first to last process sample.
-* The requested WPR ETL, if enabled and successfully captured.
+  sample count, maximum/unique observed thread counts, total counter deltas,
+  and approximate counter deltas for intervals whose adjacent samples share a
+  phase.
 
-`process.sample` events identify the Win32 source API for each metric and
-include sample start/completion times, query duration, cumulative CPU times,
-I/O counts/bytes, page faults, working set, private pagefile usage, handle
-count, and (on its separate cadence) sampled thread IDs. Thread IDs first seen
-in a snapshot are listed separately as an observed-churn proxy; short-lived
-threads between snapshots may be missed, and Windows may reuse IDs. The
-system-wide snapshot's own duration is recorded because it can be relatively
-expensive. Counter-query errors are attached to the sample instead of being
-replaced with zero.
+The `process.sampling_started` event lists the Win32 source APIs. `process.sample`
+events include sample start/completion times, query duration, cumulative CPU
+times, I/O counts/bytes, page faults, working set, private pagefile usage,
+handle count, and (on its separate cadence) sampled thread IDs. Thread IDs
+first seen in a snapshot are listed separately as an observed-churn proxy;
+short-lived threads between snapshots may be missed, and Windows may reuse
+IDs. The system-wide snapshot's own duration is recorded because it can be
+relatively expensive. Counter-query errors are attached to the sample instead
+of being replaced with zero.
+
+The current Windows PAL uses `CreateThread` for each stdio read/write and
+socket send/receive worker; each worker performs one operation and returns.
+This is not a persistent worker pool. A pending stdin read can keep its
+one-shot worker blocked until input arrives, but fast output workers may start
+and finish between thread snapshots. The unprivileged snapshots therefore
+measure observed live threads and a lower bound on distinct thread IDs, not an
+exact worker-creation count.
 
 To study response timing, correlate `pty.input` records (input start/completion
 and sequence) with subsequent `pty.output` chunks using `elapsed_ns` and
