@@ -11,6 +11,7 @@ internal static class Program
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
     private const uint PageExecuteReadWrite = 0x40;
+    private const uint ConsoleCodePageUtf8 = 65001;
     private static readonly int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
@@ -91,6 +92,22 @@ internal static class Program
         GetProcAddressCallback getProcAddress = GetProcAddress;
         AllocCallback alloc = Allocate;
         FreeCallback free = Free;
+        uint previousInputCodePage = GetConsoleCP();
+        uint previousOutputCodePage = GetConsoleOutputCP();
+        if (previousInputCodePage != 0)
+        {
+            if (!SetConsoleCP(ConsoleCodePageUtf8))
+            {
+                WriteLastError("SetConsoleCP(UTF-8)");
+            }
+        }
+        if (previousOutputCodePage != 0)
+        {
+            if (!SetConsoleOutputCP(ConsoleCodePageUtf8))
+            {
+                WriteLastError("SetConsoleOutputCP(UTF-8)");
+            }
+        }
 
         try
         {
@@ -192,6 +209,20 @@ internal static class Program
             if (wasmPin.IsAllocated)
             {
                 wasmPin.Free();
+            }
+            if (previousInputCodePage != 0)
+            {
+                if (!SetConsoleCP(previousInputCodePage))
+                {
+                    WriteLastError("restore SetConsoleCP");
+                }
+            }
+            if (previousOutputCodePage != 0)
+            {
+                if (!SetConsoleOutputCP(previousOutputCodePage))
+                {
+                    WriteLastError("restore SetConsoleOutputCP");
+                }
             }
             GC.KeepAlive(loadLibrary);
             GC.KeepAlive(getProcAddress);
@@ -488,6 +519,20 @@ internal static class Program
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetConsoleCP();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetConsoleOutputCP();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCP(uint codePage);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleOutputCP(uint codePage);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
