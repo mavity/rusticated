@@ -108,10 +108,12 @@ func formatStartupBannerWithAI(sessionErr error, aiEnabled bool) string {
 	lines := []string{
 		"🐚︎ K A B I B I : wearable all-weather shell v" + getVer(),
 		"   - bash",
-		"   - file manager (Ctrl+O)",
+		"   - file manager (Escape)",
 	}
 	if aiEnabled {
-		lines = append(lines, "   - AI harness (ask anything in prompt)")
+		lines = append(lines, "   - AI harness (ask anything in prompt) + /download to run on your local machine")
+	} else {
+		lines = append(lines, "   - /download to run on your local machine")
 	}
 	if sessionErr != nil {
 		lines = append(lines, "Shell initialization failed: "+sessionErr.Error())
