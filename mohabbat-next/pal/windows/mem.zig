@@ -38,6 +38,8 @@ pub const OpKind = enum(u8) {
     proc_wait = 5,
     sock_recv = 6,
     pipe_connect = 7,
+    signal_wait = 8,
+    system_info_wait = 9,
 };
 
 pub const PendingOp = struct {
@@ -70,6 +72,8 @@ pub const PalState = struct {
     ws2_32: ?*anyopaque = null,
     crypt32: ?*anyopaque = null,
     bcrypt: ?*anyopaque = null,
+    user32: ?*anyopaque = null,
+    advapi32: ?*anyopaque = null,
     iocp: win.HANDLE = null,
     stdin_h: win.HANDLE = null,
     stdout_h: win.HANDLE = null,
@@ -82,6 +86,9 @@ pub const PalState = struct {
     wsa_started: bool = false,
     saved_in_mode: u32 = 0,
     has_saved_in_mode: bool = false,
+    system_info_hash: u64 = 0,
+    has_system_info_hash: bool = false,
+    system_info_version: u32 = 1,
 
     // Resolved kernel32 functions
     p_get_std_handle: ?*const fn (u32) callconv(win.win_cc) win.HANDLE = null,

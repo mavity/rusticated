@@ -31,6 +31,7 @@ pub const ERROR_NOENT: u32 = 44;
 pub const ERROR_NOMEM: u32 = 48;
 pub const ERROR_UNSUPPORTED: u32 = 52;
 pub const ERROR_NOTDIR: u32 = 54;
+pub const ERROR_NOTTY: u32 = 59;
 pub const ERROR_OVERFLOW: u32 = 61;
 pub const ERROR_PERM: u32 = 63;
 pub const ERROR_PIPE: u32 = 64;

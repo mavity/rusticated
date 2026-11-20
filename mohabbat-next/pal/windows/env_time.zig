@@ -118,6 +118,144 @@ fn copyFixed(dst: []u8, src: []const u8) void {
     @memcpy(dst[0..n], src[0..n]);
 }
 
+const SystemPowerStatus = extern struct {
+    ac_line_status: u8 = 255,
+    battery_flag: u8 = 255,
+    battery_life_percent: u8 = 255,
+    system_status_flag: u8 = 0,
+    battery_life_time: u32 = 0xffff_ffff,
+    battery_full_life_time: u32 = 0xffff_ffff,
+};
+
+const TimeZoneInformation = extern struct {
+    bias: i32 = 0,
+    standard_name: [32]u16 = @splat(0),
+    standard_date: [8]u16 = @splat(0),
+    standard_bias: i32 = 0,
+    daylight_name: [32]u16 = @splat(0),
+    daylight_date: [8]u16 = @splat(0),
+    daylight_bias: i32 = 0,
+};
+
+var test_system_context_override: ?*const fn (*pal_abi.AbiPlatformInfo) void = null;
+
+pub fn setTestSystemContextOverride(hook: ?*const fn (*pal_abi.AbiPlatformInfo) void) void {
+    if (!builtin.is_test) return;
+    test_system_context_override = hook;
+}
+
+pub fn populateSystemContext(s: *PalState, info: *pal_abi.AbiPlatformInfo) void {
+    info.system_context_version = s.system_info_version;
+
+    if (builtin.is_test) {
+        if (test_system_context_override) |hook| {
+            hook(info);
+            return;
+        }
+    }
+
+    if (mem.resolveKernel32(s, "GetUserDefaultLocaleName")) |p_loc| {
+        const LocFn = *const fn ([*]u16, i32) callconv(win.win_cc) i32;
+        const get_loc: LocFn = @ptrCast(@alignCast(p_loc));
+        var wbuf: [85]u16 = @splat(0);
+        const wlen = get_loc(&wbuf, wbuf.len);
+        if (wlen > 1) {
+            _ = mem.wideToUtf8(s, &wbuf, wlen - 1, &info.locale, info.locale.len);
+        }
+    }
+
+    if (mem.resolveKernel32(s, "GetTimeZoneInformation")) |p_tz| {
+        const TzFn = *const fn (*TimeZoneInformation) callconv(win.win_cc) u32;
+        const get_tz: TzFn = @ptrCast(@alignCast(p_tz));
+        var tzi: TimeZoneInformation = .{};
+        const tz_id = get_tz(&tzi);
+        if (tz_id != 0xffff_ffff) {
+            const name_slice = if (tz_id == 2 and tzi.daylight_name[0] != 0) &tzi.daylight_name else &tzi.standard_name;
+            var len_w: usize = 0;
+            while (len_w < name_slice.len and name_slice[len_w] != 0) : (len_w += 1) {}
+            if (len_w > 0) {
+                _ = mem.wideToUtf8(s, name_slice, @intCast(len_w), &info.time_zone, info.time_zone.len);
+            }
+        }
+    }
+
+    if (mem.resolveKernel32(s, "GetSystemPowerStatus")) |p_pwr| {
+        const PwrFn = *const fn (*SystemPowerStatus) callconv(win.win_cc) i32;
+        const get_pwr: PwrFn = @ptrCast(@alignCast(p_pwr));
+        var sps: SystemPowerStatus = .{};
+        if (get_pwr(&sps) != 0) {
+            if (sps.ac_line_status == 1) {
+                copyFixed(&info.power_source, "ac");
+            } else if (sps.ac_line_status == 0) {
+                copyFixed(&info.power_source, "battery");
+            }
+        }
+    }
+
+    if (mem.resolveDll(s, &s.user32, "user32.dll", "GetKeyboardLayoutNameW")) |p_kbd| {
+        const KbdFn = *const fn ([*]u16) callconv(win.win_cc) i32;
+        const get_kbd: KbdFn = @ptrCast(@alignCast(p_kbd));
+        var wbuf: [16]u16 = @splat(0);
+        if (get_kbd(&wbuf) != 0) {
+            var len_w: usize = 0;
+            while (len_w < wbuf.len and wbuf[len_w] != 0) : (len_w += 1) {}
+            if (len_w > 0) {
+                _ = mem.wideToUtf8(s, &wbuf, @intCast(len_w), &info.keyboard_layout_id, info.keyboard_layout_id.len);
+            }
+        }
+    }
+
+    if (mem.resolveDll(s, &s.advapi32, "advapi32.dll", "RegGetValueW")) |p_reg| {
+        const RegGetFn = *const fn (usize, [*:0]const u16, [*:0]const u16, u32, ?*u32, ?*u32, ?*u32) callconv(win.win_cc) i32;
+        const reg_get: RegGetFn = @ptrCast(@alignCast(p_reg));
+        const hkcu: usize = 0x8000_0001;
+        const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        const val_name = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
+        var light_theme: u32 = 1;
+        var data_size: u32 = @sizeOf(u32);
+        // RRF_RT_REG_DWORD = 0x00000010
+        if (reg_get(hkcu, subkey, val_name, 0x10, null, &light_theme, &data_size) == 0) {
+            copyFixed(&info.appearance, if (light_theme == 0) "dark" else "light");
+        }
+    }
+}
+
+fn hashSlice(h: u64, bytes: []const u8) u64 {
+    var v = h;
+    for (bytes) |b| {
+        v ^= b;
+        v *%= 0x100000001b3;
+    }
+    return v;
+}
+
+pub fn captureSystemContextHash(s: *PalState) u64 {
+    var info: pal_abi.AbiPlatformInfo = .{};
+    populateSystemContext(s, &info);
+    var h: u64 = 0xcbf29ce484222325;
+    h = hashSlice(h, &info.locale);
+    h = hashSlice(h, &info.time_zone);
+    h = hashSlice(h, &info.keyboard_layout_id);
+    h = hashSlice(h, &info.appearance);
+    h = hashSlice(h, &info.power_source);
+    return h;
+}
+
+pub fn pollSystemContextChanged(s: *PalState) bool {
+    const h = captureSystemContextHash(s);
+    if (!s.has_system_info_hash) {
+        s.system_info_hash = h;
+        s.has_system_info_hash = true;
+        return false;
+    }
+    if (h != s.system_info_hash) {
+        s.system_info_hash = h;
+        s.system_info_version +%= 1;
+        return true;
+    }
+    return false;
+}
+
 fn expectFilled(actual: []const u8, value: u8) !void {
     for (actual) |byte| try std.testing.expectEqual(value, byte);
 }
@@ -162,6 +300,7 @@ pub fn getPlatformInfo(s: *PalState, out: [*]u8, cap: usize) u32 {
             _ = mem.wideToUtf8(s, &wbuf, @intCast(wlen), &info.temp_dir, info.temp_dir.len);
         }
     }
+    populateSystemContext(s, &info);
     const bytes = std.mem.asBytes(&info);
     @memcpy(out[0..bytes.len], bytes);
     return 0;

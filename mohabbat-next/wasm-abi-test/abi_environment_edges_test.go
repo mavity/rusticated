@@ -954,3 +954,37 @@ func TestRusticatedABIArgumentVectorEncoding(t *testing.T) {
 		}
 	}
 }
+
+func TestRusticatedABISystemInfoWaitAndCancel(t *testing.T) {
+	info := syscall.GetPlatformInfo()
+	if info.SystemContextVersion == 0 {
+		t.Fatalf("SystemContextVersion = 0, want >= 1")
+	}
+
+	wait := syscall.BeginPlatformInfoWait()
+	if wait == nil {
+		t.Fatal("BeginPlatformInfoWait returned nil")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- wait.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Wait completed prematurely without system context change: %v", err)
+	case <-time.After(350 * time.Millisecond):
+	}
+
+	wait.Cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, syscall.ECANCELED) {
+			t.Fatalf("Wait after Cancel = %v, want ECANCELED", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not unblock after Cancel")
+	}
+}

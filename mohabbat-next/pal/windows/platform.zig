@@ -156,7 +156,7 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
             @atomicStore(bool, &op.canceled, true, .release);
-            if (op.kind == .timer) {
+            if (op.kind == .timer or op.kind == .signal_wait or op.kind == .system_info_wait) {
                 const gov = op.guest_ov.?;
                 mem.freeOp(s, op);
                 mem.completeInline(gov, pal_abi.ERROR_CANCELED, 0, 0);
@@ -721,8 +721,8 @@ fn abiProcessSignal(proc_handle: u64, signum: u32) callconv(win.win_cc) void {
     proc_tty.processSignal(statePtr(), proc_handle, signum);
 }
 
-fn abiSignalWait(ov: *pal_abi.Overlapped, _: u32) callconv(win.win_cc) void {
-    mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+fn abiSignalWait(ov: *pal_abi.Overlapped, sig: u32) callconv(win.win_cc) void {
+    proc_tty.signalWait(statePtr(), ov, sig);
 }
 
 fn abiTtySetMode(handle: u64, raw_mode: u32) callconv(win.win_cc) void {
@@ -733,16 +733,70 @@ fn abiTtyGetSize(handle: u64) callconv(win.win_cc) u32 {
     return proc_tty.ttyGetSize(statePtr(), handle);
 }
 
-fn abiTtySetSize(_: u64, _: u32, _: u32) callconv(win.win_cc) u32 {
-    return 0;
+fn abiTtySetSize(handle: u64, cols: u32, rows: u32) callconv(win.win_cc) u32 {
+    return proc_tty.ttySetSize(statePtr(), handle, cols, rows);
 }
 
 fn abiFdIsatty(handle: u32) callconv(win.win_cc) u32 {
     return proc_tty.fdIsatty(statePtr(), handle);
 }
 
+const SYSTEM_INFO_POLL_MS: u64 = 250;
+
+fn armSystemInfoWait(s: *PalState, ov: *pal_abi.Overlapped) void {
+    // Capture baseline hash when the first waiter arms so changes are relative to registration.
+    var has_waiter = false;
+    for (&s.ops) |*existing| {
+        if (existing.used and existing.kind == .system_info_wait) {
+            has_waiter = true;
+            break;
+        }
+    }
+    if (!has_waiter or !s.has_system_info_hash) {
+        s.system_info_hash = env_time.captureSystemContextHash(s);
+        s.has_system_info_hash = true;
+    }
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    const now = if (s.p_get_tick_count64) |gtc| gtc() else 0;
+    op.kind = .system_info_wait;
+    op.guest_ov = ov;
+    op.deadline_ms = now + SYSTEM_INFO_POLL_MS;
+}
+
+fn processSystemInfoTimers(s: *PalState, now: u64) bool {
+    var due = false;
+    for (&s.ops) |*op| {
+        if (op.used and op.kind == .system_info_wait and op.deadline_ms <= now) {
+            due = true;
+            break;
+        }
+    }
+    if (!due) return false;
+
+    if (env_time.pollSystemContextChanged(s)) {
+        for (&s.ops) |*op| {
+            if (op.used and op.kind == .system_info_wait) {
+                const gov = op.guest_ov.?;
+                mem.freeOp(s, op);
+                mem.completeInline(gov, 0, 0, 0);
+            }
+        }
+        return true;
+    }
+
+    for (&s.ops) |*op| {
+        if (op.used and op.kind == .system_info_wait and op.deadline_ms <= now) {
+            op.deadline_ms = now + SYSTEM_INFO_POLL_MS;
+        }
+    }
+    return false;
+}
+
 fn abiSystemInfoWait(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
-    mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
+    armSystemInfoWait(statePtr(), ov);
 }
 
 fn initializeAbiTable(table: *pal_abi.PalAbiTable, wasm_bytes: ?[*]const u8, wasm_len: usize) void {
@@ -875,18 +929,18 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
         entry();
         if (s.pending_count == 0) break;
 
-        // Compute earliest timer deadline
+        // Compute earliest timer / system-info poll deadline
         const now = if (s.p_get_tick_count64) |gtc| gtc() else 0;
         var timeout_ms: u32 = 0xffff_ffff;
-        var fired_timer = false;
+        var fired_timer = processSystemInfoTimers(s, now);
         for (&s.ops) |*op| {
-            if (op.used and op.kind == .timer) {
-                if (op.deadline_ms <= now) {
+            if (op.used and (op.kind == .timer or op.kind == .system_info_wait)) {
+                if (op.kind == .timer and op.deadline_ms <= now) {
                     const gov = op.guest_ov.?;
                     mem.freeOp(s, op);
                     mem.completeInline(gov, 0, 0, 0);
                     fired_timer = true;
-                } else {
+                } else if (op.deadline_ms > now) {
                     const rem: u32 = @intCast(@min(op.deadline_ms - now, 0xffff_fffe));
                     if (rem < timeout_ms) timeout_ms = rem;
                 }
@@ -1255,12 +1309,7 @@ test "Windows ABI table returns explicit unsupported statuses" {
     ov = .{};
     table.signal_wait(&ov, 0);
     try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov.flags);
-    try std.testing.expectEqual(pal_abi.ERROR_UNSUPPORTED, ov.@"error");
-
-    ov = .{};
-    table.system_info_wait(&ov);
-    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov.flags);
-    try std.testing.expectEqual(pal_abi.ERROR_UNSUPPORTED, ov.@"error");
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, ov.@"error");
 }
 
 test "Windows ABI table preserves TTY fallback behavior" {
@@ -1272,7 +1321,7 @@ test "Windows ABI table preserves TTY fallback behavior" {
     initializeAbiTable(&table, null, 0);
 
     try std.testing.expectEqual(@as(u32, (80 << 16) | 24), table.tty_get_size(3));
-    try std.testing.expectEqual(@as(u32, 0), table.tty_set_size(1, 120, 40));
+    try std.testing.expectEqual(pal_abi.ERROR_NOTTY, table.tty_set_size(1, 120, 40));
     try std.testing.expectEqual(@as(u32, 0), table.fd_isatty(3));
     table.tty_set_mode(3, 1);
     table.process_signal(0xffff, 15);
@@ -1932,67 +1981,169 @@ test "Windows ABI handle_close releases and clears handle variants" {
     }
 }
 
-test "Windows ABI signal_wait completes unsupported requests for every signal class" {
-    const signals = [_]u32{ 0, 1, 2, 3, 9, 15, 31, 32, 127, 255, std.math.maxInt(u32) };
+test "Windows ABI signal_wait registers, replaces same-signal waiters, dispatches, and cancels" {
     var state: PalState = .{};
     const table = testAbiTable(&state, null, 0);
 
-    for (signals) |signal| {
-        var ov: pal_abi.Overlapped = .{
-            .flags = 0xffff_ffff,
-            .@"error" = 0xffff_ffff,
-            .continued = 1,
-            .result_ext = 2,
-        };
-        table.signal_wait(&ov, signal);
-        try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov.flags);
-        try std.testing.expectEqual(pal_abi.ERROR_UNSUPPORTED, ov.@"error");
-        try std.testing.expectEqual(@as(u64, 0), ov.continued);
-        try std.testing.expectEqual(@as(u64, 0), ov.result_ext);
-    }
+    // Signal 0 is invalid.
+    var bad_ov: pal_abi.Overlapped = .{};
+    table.signal_wait(&bad_ov, 0);
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, bad_ov.flags);
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, bad_ov.@"error");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_count);
+
+    // Register SIGINT (2) and SIGWINCH (28).
+    var ov_int_1: pal_abi.Overlapped = .{};
+    var ov_winch: pal_abi.Overlapped = .{};
+    table.signal_wait(&ov_int_1, 2);
+    table.signal_wait(&ov_winch, 28);
+    try std.testing.expectEqual(@as(usize, 2), state.pending_count);
+    try std.testing.expectEqual(@as(u32, 0), ov_int_1.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov_winch.flags);
+
+    // Re-registering SIGINT cancels the prior waiter for SIGINT without touching SIGWINCH.
+    var ov_int_2: pal_abi.Overlapped = .{};
+    table.signal_wait(&ov_int_2, 2);
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov_int_1.flags);
+    try std.testing.expectEqual(pal_abi.ERROR_CANCELED, ov_int_1.@"error");
+    try std.testing.expectEqual(@as(u32, 0), ov_int_2.flags);
+    try std.testing.expectEqual(@as(usize, 2), state.pending_count);
+
+    // Dispatching SIGINT completes only the active SIGINT waiter with 0.
+    proc_tty.dispatchSignal(&state, 2);
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov_int_2.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov_int_2.@"error");
+    try std.testing.expectEqual(@as(u32, 0), ov_winch.flags);
+    try std.testing.expectEqual(@as(usize, 1), state.pending_count);
+
+    // Explicit cancel completes the remaining SIGWINCH waiter.
+    table.cancel(&ov_winch);
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov_winch.flags);
+    try std.testing.expectEqual(pal_abi.ERROR_CANCELED, ov_winch.@"error");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_count);
 }
 
-test "Windows ABI tty_set_size preserves the explicit no-op success result" {
-    const Case = struct { handle: u64, cols: u32, rows: u32 };
-    const cases = [_]Case{
-        .{ .handle = 0, .cols = 0, .rows = 0 },
-        .{ .handle = 1, .cols = 1, .rows = 1 },
-        .{ .handle = 2, .cols = 80, .rows = 24 },
-        .{ .handle = 3, .cols = 120, .rows = 40 },
-        .{ .handle = 0xffff, .cols = 255, .rows = 255 },
-        .{ .handle = 1, .cols = 0, .rows = 24 },
-        .{ .handle = 2, .cols = 80, .rows = 0 },
-        .{ .handle = 3, .cols = 0xffff, .rows = 0xffff },
-        .{ .handle = std.math.maxInt(u64), .cols = 1, .rows = 0xffff },
-        .{ .handle = 0, .cols = std.math.maxInt(u32), .rows = 1 },
-        .{ .handle = 2, .cols = 1, .rows = std.math.maxInt(u32) },
-    };
+const TtySizeTestState = struct {
+    var resize_calls: usize = 0;
+    var last_cols: i16 = 0;
+    var last_rows: i16 = 0;
+    var resize_hr: i32 = 0;
+    var console_mode_ok: i32 = 0;
+
+    fn resizePseudoConsole(_: win.HANDLE, size: win.Coord) callconv(win.win_cc) i32 {
+        resize_calls += 1;
+        last_cols = size.x;
+        last_rows = size.y;
+        return resize_hr;
+    }
+
+    fn getConsoleMode(_: win.HANDLE, mode: *u32) callconv(win.win_cc) i32 {
+        mode.* = 7;
+        return console_mode_ok;
+    }
+
+    fn getProc(_: ?*anyopaque, name: [*:0]const u8) callconv(win.win_cc) ?*anyopaque {
+        const sym = std.mem.sliceTo(name, 0);
+        if (std.mem.eql(u8, sym, "ResizePseudoConsole")) return @ptrCast(@constCast(&resizePseudoConsole));
+        if (std.mem.eql(u8, sym, "GetConsoleMode")) return @ptrCast(@constCast(&getConsoleMode));
+        return null;
+    }
+};
+
+test "Windows ABI tty_set_size validates bounds, handles, non-TTYs, and PTY resize" {
+    TtySizeTestState.resize_calls = 0;
+    TtySizeTestState.resize_hr = 0;
+    TtySizeTestState.console_mode_ok = 0;
+
     var state: PalState = .{};
+    state.kernel32 = @ptrFromInt(0x1000);
+    state.host.get_proc_address = TtySizeTestState.getProc;
     const table = testAbiTable(&state, null, 0);
 
-    for (cases) |case| {
-        try std.testing.expectEqual(@as(u32, 0), table.tty_set_size(case.handle, case.cols, case.rows));
-    }
+    // Invalid dimensions.
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, table.tty_set_size(1, 0, 24));
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, table.tty_set_size(1, 80, 0));
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, table.tty_set_size(1, 32768, 24));
+    try std.testing.expectEqual(pal_abi.ERROR_INVALID, table.tty_set_size(1, 80, 32768));
+
+    // Unknown handle >= 3 returns ERROR_BADF.
+    try std.testing.expectEqual(pal_abi.ERROR_BADF, table.tty_set_size(99, 80, 24));
+
+    // Stdio non-TTY returns ERROR_NOTTY; stdio TTY returns 0.
+    try std.testing.expectEqual(pal_abi.ERROR_NOTTY, table.tty_set_size(1, 80, 24));
+    TtySizeTestState.console_mode_ok = 1;
+    try std.testing.expectEqual(@as(u32, 0), table.tty_set_size(1, 120, 40));
+
+    // Non-PTY file handle returns ERROR_NOTTY.
+    const file_he = mem.allocHandle(&state).?;
+    file_he.is_pty = false;
+    try std.testing.expectEqual(pal_abi.ERROR_NOTTY, table.tty_set_size(file_he.token, 80, 24));
+
+    // PTY handle invokes ResizePseudoConsole and maps HRESULT.
+    const pty_he = mem.allocHandle(&state).?;
+    pty_he.is_pty = true;
+    pty_he.handle = @ptrFromInt(0x2000);
+    try std.testing.expectEqual(@as(u32, 0), table.tty_set_size(pty_he.token, 132, 43));
+    try std.testing.expectEqual(@as(usize, 1), TtySizeTestState.resize_calls);
+    try std.testing.expectEqual(@as(i16, 132), TtySizeTestState.last_cols);
+    try std.testing.expectEqual(@as(i16, 43), TtySizeTestState.last_rows);
+
+    TtySizeTestState.resize_hr = -1;
+    try std.testing.expectEqual(pal_abi.ERROR_IO, table.tty_set_size(pty_he.token, 100, 30));
 }
 
-test "Windows ABI system_info_wait initializes unsupported completion fields" {
-    const seeds = [_]u64{ 0, 1, 2, 3, 7, 15, 31, 63, 127, 255, std.math.maxInt(u64) };
+const SysInfoTestState = struct {
+    var locale: []const u8 = "en-US";
+    var appearance: []const u8 = "light";
+
+    fn fillContext(info: *pal_abi.AbiPlatformInfo) void {
+        @memcpy(info.locale[0..locale.len], locale);
+        @memcpy(info.appearance[0..appearance.len], appearance);
+    }
+};
+
+test "Windows ABI system_info_wait polls, completes on context change, and cancels cleanly" {
+    SysInfoTestState.locale = "en-US";
+    SysInfoTestState.appearance = "light";
+    env_time.setTestSystemContextOverride(SysInfoTestState.fillContext);
+    defer env_time.setTestSystemContextOverride(null);
+
     var state: PalState = .{};
     const table = testAbiTable(&state, null, 0);
 
-    for (seeds) |seed| {
-        var ov: pal_abi.Overlapped = .{
-            .flags = @truncate(seed),
-            .@"error" = @truncate(seed >> 32),
-            .continued = seed,
-            .result_ext = ~seed,
-        };
-        table.system_info_wait(&ov);
-        try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov.flags);
-        try std.testing.expectEqual(pal_abi.ERROR_UNSUPPORTED, ov.@"error");
-        try std.testing.expectEqual(@as(u64, 0), ov.continued);
-        try std.testing.expectEqual(@as(u64, 0), ov.result_ext);
-    }
+    var ov1: pal_abi.Overlapped = .{};
+    var ov2: pal_abi.Overlapped = .{};
+    table.system_info_wait(&ov1);
+    table.system_info_wait(&ov2);
+    try std.testing.expectEqual(@as(usize, 2), state.pending_count);
+    try std.testing.expectEqual(@as(u32, 0), ov1.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov2.flags);
+
+    // Unchanged context re-arms deadline without completing waiters.
+    try std.testing.expect(!processSystemInfoTimers(&state, SYSTEM_INFO_POLL_MS + 10));
+    try std.testing.expectEqual(@as(u32, 0), ov1.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov2.flags);
+    try std.testing.expectEqual(@as(usize, 2), state.pending_count);
+
+    // Context change completes all active waiters and bumps system_context_version.
+    const prev_version = state.system_info_version;
+    SysInfoTestState.appearance = "dark";
+    try std.testing.expect(processSystemInfoTimers(&state, 2 * SYSTEM_INFO_POLL_MS + 20));
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov1.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov1.@"error");
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov2.flags);
+    try std.testing.expectEqual(@as(u32, 0), ov2.@"error");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_count);
+    try std.testing.expectEqual(prev_version + 1, state.system_info_version);
+
+    // Cancellation removes a pending waiter with ERROR_CANCELED.
+    var ov3: pal_abi.Overlapped = .{};
+    table.system_info_wait(&ov3);
+    try std.testing.expectEqual(@as(usize, 1), state.pending_count);
+    table.cancel(&ov3);
+    try std.testing.expectEqual(pal_abi.FLAG_COMPLETED, ov3.flags);
+    try std.testing.expectEqual(pal_abi.ERROR_CANCELED, ov3.@"error");
+    try std.testing.expectEqual(@as(usize, 0), state.pending_count);
 }
 
 test "Windows ABI free_mem releases every supplied range with MEM_RELEASE" {

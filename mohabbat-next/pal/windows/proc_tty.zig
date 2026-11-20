@@ -597,6 +597,60 @@ pub fn ttyGetSize(s: *PalState, handle: u64) u32 {
     return (cols << 16) | (rows & 0xffff);
 }
 
+pub fn ttySetSize(s: *PalState, handle: u64, cols: u32, rows: u32) u32 {
+    if (cols == 0 or rows == 0 or cols > 32767 or rows > 32767) {
+        return pal_abi.ERROR_INVALID;
+    }
+    if (handle >= 3) {
+        const he = mem.findHandle(s, handle) orelse return pal_abi.ERROR_BADF;
+        if (he.is_pty) {
+            const p_resize = mem.resolveKernel32(s, "ResizePseudoConsole") orelse return pal_abi.ERROR_UNSUPPORTED;
+            const ResizeFn = *const fn (win.HANDLE, win.Coord) callconv(win.win_cc) i32;
+            const resize: ResizeFn = @ptrCast(@alignCast(p_resize));
+            const hr = resize(he.handle, .{ .x = @intCast(cols), .y = @intCast(rows) });
+            return if (hr == 0) 0 else pal_abi.ERROR_IO;
+        }
+        return pal_abi.ERROR_NOTTY;
+    }
+    if (fdIsatty(s, @intCast(handle)) == 0) {
+        return pal_abi.ERROR_NOTTY;
+    }
+    return 0;
+}
+
+pub fn signalWait(s: *PalState, ov: *pal_abi.Overlapped, signum: u32) void {
+    if (signum == 0) {
+        mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    // Replace any existing waiter for the same signal number (matches washmhost semantics).
+    for (&s.ops) |*op| {
+        if (op.used and op.kind == .signal_wait and op.handle_token == signum) {
+            const prev_ov = op.guest_ov.?;
+            mem.freeOp(s, op);
+            mem.completeInline(prev_ov, pal_abi.ERROR_CANCELED, 0, 0);
+            break;
+        }
+    }
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .signal_wait;
+    op.guest_ov = ov;
+    op.handle_token = signum;
+}
+
+pub fn dispatchSignal(s: *PalState, signum: u32) void {
+    for (&s.ops) |*op| {
+        if (op.used and op.kind == .signal_wait and op.handle_token == signum) {
+            const gov = op.guest_ov.?;
+            mem.freeOp(s, op);
+            mem.completeInline(gov, 0, 0, 0);
+        }
+    }
+}
+
 pub fn fdIsatty(s: *PalState, handle: u32) u32 {
     const h = switch (handle) {
         0 => s.stdin_h,
