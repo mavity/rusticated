@@ -61,14 +61,12 @@ func main() {
 	var (
 		verbose    bool
 		runnerMode bool
-		palTrace   bool
 		outputPath string
 	)
 
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose build output")
 	flag.BoolVar(&runnerMode, "runner", false, "Build payload-free Windows WASM runner")
-	flag.BoolVar(&palTrace, "pal-trace", false, "Enable 50 MiB Windows PAL QPC trace slab (dumps kabibi-pal-trace.tsv on exit)")
 	flag.StringVar(&outputPath, "o", "", "Output executable path")
 	flag.StringVar(&outputPath, "out", "", "Output executable path")
 	flag.Parse()
@@ -156,13 +154,6 @@ func main() {
 	runtimeDir := filepath.Join(nextDir, "runtime")
 
 	palAbiDep := ZigDep{Name: "pal_abi", Path: palAbiPath}
-	palTraceOptsPath := filepath.Join(zigBuildDir, "pal_trace_options.zig")
-	palTraceOptsContent := fmt.Sprintf("pub const enabled: bool = %t;\n", palTrace)
-	if err := os.WriteFile(palTraceOptsPath, []byte(palTraceOptsContent), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", palTraceOptsPath, err)
-		os.Exit(1)
-	}
-	palTraceDep := ZigDep{Name: "pal_trace_options", Path: palTraceOptsPath}
 	zwasmDep := ZigDep{
 		Name: "zwasm",
 		Path: zwasmRootPath,
@@ -199,7 +190,7 @@ func main() {
 		{
 			Name:         "platform-windows-x86_64",
 			RootFile:     filepath.Join(nextDir, "pal", "windows", "platform.zig"),
-			Deps:         []ZigDep{palAbiDep, palTraceDep},
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
 			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),
@@ -210,7 +201,7 @@ func main() {
 		{
 			Name:         "platform-windows-aarch64",
 			RootFile:     filepath.Join(nextDir, "pal", "windows", "platform.zig"),
-			Deps:         []ZigDep{palAbiDep, palTraceDep},
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
 			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),

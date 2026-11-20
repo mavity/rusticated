@@ -7,27 +7,6 @@ const env_time = @import("env_time.zig");
 const fs_ops = @import("fs_ops.zig");
 const net_ops = @import("net_ops.zig");
 const proc_tty = @import("proc_tty.zig");
-const trace = @import("trace.zig");
-
-const trace_enabled: bool = if (builtin.is_test) false else @import("pal_trace_options").enabled;
-
-inline fn traceEvent(s: *PalState, kind: trace.EventKind, flags: u16, arg0: u64, arg1: u64) void {
-    if (comptime trace_enabled) {
-        trace.record(s, kind, flags, arg0, arg1);
-    }
-}
-
-inline fn traceAbiEnter(s: *PalState, id: trace.AbiId, arg0: u64, arg1: u64) void {
-    if (comptime trace_enabled) {
-        trace.record(s, .abi_enter, @intFromEnum(id), arg0, arg1);
-    }
-}
-
-inline fn traceAbiExit(s: *PalState, id: trace.AbiId, arg0: u64, arg1: u64) void {
-    if (comptime trace_enabled) {
-        trace.record(s, .abi_exit, @intFromEnum(id), arg0, arg1);
-    }
-}
 
 const PalState = mem.PalState;
 
@@ -64,38 +43,24 @@ fn pageAlign(n: usize) usize {
 
 // ─── PalAbiTable Implementations ─────────────────────────────────────────────
 
-fn abiAllocMem(size: usize, align_bytes: usize, flags: u32) callconv(win.win_cc) ?[*]u8 {
+fn abiAllocMem(size: usize, _: usize, flags: u32) callconv(win.win_cc) ?[*]u8 {
     const s = statePtr();
-    traceAbiEnter(s, .alloc_mem, size, flags);
-    const va = s.p_virtual_alloc orelse {
-        traceAbiExit(s, .alloc_mem, 0, align_bytes);
-        return null;
-    };
+    const va = s.p_virtual_alloc orelse return null;
     const prot: u32 = if (flags == pal_abi.MEM_CODE_EXEC_RX) 0x20 else if (flags == pal_abi.MEM_CODE_JIT_RW) 0x04 else 0x04;
     // MEM_COMMIT | MEM_RESERVE = 0x3000
-    const res = va(null, pageAlign(@max(size, 1)), 0x3000, prot);
-    traceAbiExit(s, .alloc_mem, @intFromPtr(res), size);
-    return res;
+    return va(null, pageAlign(@max(size, 1)), 0x3000, prot);
 }
 
 fn abiProtectMem(ptr: [*]u8, size: usize, flags: u32) callconv(win.win_cc) i32 {
     const s = statePtr();
-    traceAbiEnter(s, .protect_mem, size, flags);
-    const vp = s.p_virtual_protect orelse {
-        traceAbiExit(s, .protect_mem, 1, size);
-        return -1;
-    };
+    const vp = s.p_virtual_protect orelse return -1;
     const prot: u32 = if (flags == pal_abi.MEM_CODE_EXEC_RX) 0x20 else 0x04;
     var old: u32 = 0;
-    const rc: i32 = if (vp(ptr, pageAlign(@max(size, 1)), prot, &old) != 0) 0 else -1;
-    traceAbiExit(s, .protect_mem, @bitCast(@as(i64, rc)), size);
-    return rc;
+    return if (vp(ptr, pageAlign(@max(size, 1)), prot, &old) != 0) 0 else -1;
 }
 
-fn abiFreeMem(ptr: [*]u8, size: usize) callconv(win.win_cc) void {
+fn abiFreeMem(ptr: [*]u8, _: usize) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .free_mem, size, @intFromPtr(ptr));
-    defer traceAbiExit(s, .free_mem, size, 0);
     if (s.p_virtual_free) |vf| {
         _ = vf(ptr, 0, 0x8000); // MEM_RELEASE
     }
@@ -103,8 +68,6 @@ fn abiFreeMem(ptr: [*]u8, size: usize) callconv(win.win_cc) void {
 
 fn abiFlushIcache(ptr: [*]const u8, size: usize) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .flush_icache, size, @intFromPtr(ptr));
-    defer traceAbiExit(s, .flush_icache, size, 0);
     if (s.p_flush_icache) |fi| {
         if (s.p_get_current_process) |gcp| {
             _ = fi(gcp(), ptr, size);
@@ -123,20 +86,13 @@ fn writeHostPanicMessage(s: *PalState, msg: [*]const u8, len: usize) void {
 
 fn abiHostPanic(msg: [*]const u8, len: usize) callconv(win.win_cc) noreturn {
     const s = statePtr();
-    if (comptime trace_enabled) {
-        traceAbiEnter(s, .host_panic, len, @atomicLoad(u32, &s.trace_count, .acquire));
-        trace.record(s, .host_panic, 0, len, @atomicLoad(u32, &s.trace_count, .acquire));
-        trace.dump(s);
-    }
     writeHostPanicMessage(s, msg, len);
     if (s.p_exit_process) |ep| ep(HOST_PANIC_EXIT_CODE);
     while (true) {}
 }
 
 fn abiRusticatedDebug(val: i32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .rusticated_debug, @bitCast(@as(i64, val)), 0);
-    traceAbiExit(s, .rusticated_debug, 0, 0);
+    _ = val;
 }
 
 fn prepareProcessExit(s: *PalState, code: i32) i32 {
@@ -146,79 +102,45 @@ fn prepareProcessExit(s: *PalState, code: i32) i32 {
 
 fn abiProcessExit(code: i32) callconv(win.win_cc) noreturn {
     const s = statePtr();
-    if (comptime trace_enabled) {
-        traceAbiEnter(s, .process_exit, @bitCast(@as(i64, code)), @atomicLoad(u32, &s.trace_count, .acquire));
-        trace.record(s, .process_exit, 0, @bitCast(@as(i64, code)), @atomicLoad(u32, &s.trace_count, .acquire));
-        trace.dump(s);
-    }
     const exit_code = prepareProcessExit(s, code);
     if (s.p_exit_process) |ep| ep(exit_code);
     while (true) {}
 }
 
 fn abiGetTime() callconv(win.win_cc) u64 {
-    const s = statePtr();
-    traceAbiEnter(s, .get_time, 0, 0);
-    const t = env_time.getTime(s);
-    traceAbiExit(s, .get_time, t, 0);
-    return t;
+    return env_time.getTime(statePtr());
 }
 
 fn abiGetRandom(buf: [*]u8, len: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .get_random, len, 0);
-    defer traceAbiExit(s, .get_random, len, 0);
-    env_time.getRandom(s, buf, len);
+    env_time.getRandom(statePtr(), buf, len);
 }
 
 fn abiGetArgs(buf: [*]u8, cap: usize) callconv(win.win_cc) u64 {
-    const s = statePtr();
-    traceAbiEnter(s, .get_args, cap, 0);
-    const res = env_time.getArgs(s, buf, cap);
-    traceAbiExit(s, .get_args, res, 0);
-    return res;
+    return env_time.getArgs(statePtr(), buf, cap);
 }
 
 fn abiGetEnv(buf: [*]u8, cap: usize) callconv(win.win_cc) u64 {
-    const s = statePtr();
-    traceAbiEnter(s, .get_env, cap, 0);
-    const res = env_time.getEnv(s, buf, cap);
-    traceAbiExit(s, .get_env, res, 0);
-    return res;
+    return env_time.getEnv(statePtr(), buf, cap);
 }
 
 fn abiGetCwd(buf: [*]u8, cap: usize) callconv(win.win_cc) u64 {
-    const s = statePtr();
-    traceAbiEnter(s, .get_cwd, cap, 0);
-    const res = env_time.getCwd(s, buf, cap);
-    traceAbiExit(s, .get_cwd, res, 0);
-    return res;
+    return env_time.getCwd(statePtr(), buf, cap);
 }
 
 fn abiSetCwd(path: [*]const u8, len: usize) callconv(win.win_cc) u32 {
-    const s = statePtr();
-    traceAbiEnter(s, .set_cwd, len, 0);
-    const res = env_time.setCwd(s, path, len);
-    traceAbiExit(s, .set_cwd, res, 0);
-    return res;
+    return env_time.setCwd(statePtr(), path, len);
 }
 
 fn abiGetPlatformInfo(out: [*]u8, cap: usize) callconv(win.win_cc) u32 {
-    const s = statePtr();
-    traceAbiEnter(s, .get_platform_info, cap, 0);
-    const res = env_time.getPlatformInfo(s, out, cap);
-    traceAbiExit(s, .get_platform_info, res, 0);
-    return res;
+    return env_time.getPlatformInfo(statePtr(), out, cap);
 }
 
 fn abiTimerSet(ov: *pal_abi.Overlapped, delay_ms: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .timer_set, delay_ms, s.pending_count);
-    defer traceAbiExit(s, .timer_set, delay_ms, s.pending_count);
     if (delay_ms == 0) {
         mem.completeInline(ov, 0, 0, 0);
         return;
     }
+    const s = statePtr();
     const op = mem.allocOp(s) orelse {
         mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
@@ -231,11 +153,8 @@ fn abiTimerSet(ov: *pal_abi.Overlapped, delay_ms: u32) callconv(win.win_cc) void
 
 fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .cancel, @intFromPtr(ov), s.pending_count);
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
-            const k = @intFromEnum(op.kind);
-            const tok = op.handle_token;
             @atomicStore(bool, &op.canceled, true, .release);
             if (op.kind == .timer) {
                 const gov = op.guest_ov.?;
@@ -255,17 +174,14 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
                 if (s.p_cancel_sync_io) |cancel| _ = cancel(op.worker_handle);
                 if (s.p_wait_single) |wait| _ = wait(op.worker_handle, 0xffff_ffff);
             }
-            traceAbiExit(s, .cancel, k, tok);
             return;
         }
     }
-    traceAbiExit(s, .cancel, 0, 0);
 }
 
 fn stdHandleReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
     const s = statePtr();
-    traceEvent(s, .worker_read_start, 0, op.len, op.handle_token);
     const rf = s.p_read_file orelse {
         op.win_error = pal_abi.ERROR_UNSUPPORTED;
         if (s.p_post_queued) |pq| _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
@@ -285,7 +201,6 @@ fn stdHandleReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     } else {
         op.win_error = 0;
     }
-    traceEvent(s, .worker_read_done, 0, n, op.win_error);
     _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
     return 0;
 }
@@ -293,7 +208,6 @@ fn stdHandleReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
 fn stdHandleWriteWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
     const s = statePtr();
-    traceEvent(s, .worker_write_start, 0, op.len, op.handle_token);
     const wf = s.p_write_file orelse {
         op.win_error = pal_abi.ERROR_UNSUPPORTED;
         if (s.p_post_queued) |pq| _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
@@ -308,7 +222,6 @@ fn stdHandleWriteWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     } else {
         op.win_error = 0;
     }
-    traceEvent(s, .worker_write_done, 0, n, op.win_error);
     _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
     return 0;
 }
@@ -395,8 +308,6 @@ fn sockSendWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
 
 fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .read, handle, len);
-    defer traceAbiExit(s, .read, handle, ov.flags);
     if (handle == 0) {
         if (len == 0) {
             mem.completeInline(ov, 0, 0, 0);
@@ -545,8 +456,6 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
 
 fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .write, handle, len);
-    defer traceAbiExit(s, .write, handle, ov.flags);
     if (handle >= 3) {
         if (mem.findHandle(s, handle)) |he| {
             if (he.is_pty) {
@@ -697,23 +606,15 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
 }
 
 fn abiSeek(ov: *pal_abi.Overlapped, handle: u64, off: i64, whence: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .seek, handle, @bitCast(off));
-    defer traceAbiExit(s, .seek, handle, ov.@"error");
-    fs_ops.seek(s, ov, handle, off, whence);
+    fs_ops.seek(statePtr(), ov, handle, off, whence);
 }
 
 fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .handle_truncate, handle, @bitCast(size));
-    defer traceAbiExit(s, .handle_truncate, handle, ov.@"error");
-    fs_ops.handleTruncate(s, ov, handle, size);
+    fs_ops.handleTruncate(statePtr(), ov, handle, size);
 }
 
 fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
     const s = statePtr();
-    traceAbiEnter(s, .handle_close, handle, 0);
-    defer traceAbiExit(s, .handle_close, handle, 0);
     const he = mem.findHandle(s, handle) orelse return;
     if (he.is_pty) {
         if (s.p_close_handle) |ch| {
@@ -745,179 +646,102 @@ fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
 }
 
 fn abiPathOpen(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_open, len, flags);
-    defer traceAbiExit(s, .path_open, len, ov.@"error");
-    fs_ops.pathOpen(s, ov, path, len, flags);
+    fs_ops.pathOpen(statePtr(), ov, path, len, flags);
 }
 
 fn abiDirRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .dir_read, handle, len);
-    defer traceAbiExit(s, .dir_read, handle, ov.@"error");
-    fs_ops.dirRead(s, ov, handle, buf, len);
+    fs_ops.dirRead(statePtr(), ov, handle, buf, len);
 }
 
 fn abiPathStat(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32, out: [*]u8, cap: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_stat, len, flags);
-    defer traceAbiExit(s, .path_stat, len, ov.@"error");
-    fs_ops.pathStat(s, ov, path, len, flags, out, cap);
+    fs_ops.pathStat(statePtr(), ov, path, len, flags, out, cap);
 }
 
 fn abiPathLink(ov: *pal_abi.Overlapped, src: [*]const u8, s_len: usize, dst: [*]const u8, d_len: usize, flags: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_link, s_len, d_len);
-    defer traceAbiExit(s, .path_link, ov.@"error", 0);
-    fs_ops.pathLink(s, ov, src, s_len, dst, d_len, flags);
+    fs_ops.pathLink(statePtr(), ov, src, s_len, dst, d_len, flags);
 }
 
 fn abiPathSymlink(ov: *pal_abi.Overlapped, target: [*]const u8, t_len: usize, link: [*]const u8, l_len: usize, kind: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_symlink, t_len, l_len);
-    defer traceAbiExit(s, .path_symlink, ov.@"error", 0);
-    fs_ops.pathSymlink(s, ov, target, t_len, link, l_len, kind);
+    fs_ops.pathSymlink(statePtr(), ov, target, t_len, link, l_len, kind);
 }
 
 fn abiPathReadlink(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, out: [*]u8, cap: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_readlink, len, cap);
-    defer traceAbiExit(s, .path_readlink, ov.@"error", 0);
-    fs_ops.pathReadlink(s, ov, path, len, out, cap);
+    fs_ops.pathReadlink(statePtr(), ov, path, len, out, cap);
 }
 
 fn abiPathChmod(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_chmod, len, mode);
-    defer traceAbiExit(s, .path_chmod, ov.@"error", 0);
-    fs_ops.pathChmod(s, ov, path, len, mode);
+    fs_ops.pathChmod(statePtr(), ov, path, len, mode);
 }
 
 fn abiPathSetTimes(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, at_sec: i64, at_nsec: u32, mt_sec: i64, mt_nsec: u32, flags: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_set_times, len, flags);
-    defer traceAbiExit(s, .path_set_times, ov.@"error", 0);
-    fs_ops.pathSetTimes(s, ov, path, len, at_sec, at_nsec, mt_sec, mt_nsec, flags);
+    fs_ops.pathSetTimes(statePtr(), ov, path, len, at_sec, at_nsec, mt_sec, mt_nsec, flags);
 }
 
 fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_remove, len, flags);
-    defer traceAbiExit(s, .path_remove, ov.@"error", 0);
-    fs_ops.pathRemove(s, ov, path, len, flags);
+    fs_ops.pathRemove(statePtr(), ov, path, len, flags);
 }
 
 fn abiPathMkdir(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_mkdir, len, mode);
-    defer traceAbiExit(s, .path_mkdir, ov.@"error", 0);
-    fs_ops.pathMkdir(s, ov, path, len, mode);
+    fs_ops.pathMkdir(statePtr(), ov, path, len, mode);
 }
 
 fn abiPathRename(ov: *pal_abi.Overlapped, old_p: [*]const u8, o_len: usize, new_p: [*]const u8, n_len: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .path_rename, o_len, n_len);
-    defer traceAbiExit(s, .path_rename, ov.@"error", 0);
-    fs_ops.pathRename(s, ov, old_p, o_len, new_p, n_len);
+    fs_ops.pathRename(statePtr(), ov, old_p, o_len, new_p, n_len);
 }
 
 fn abiNetOpen(ov: *pal_abi.Overlapped, addr: [*]const u8, len: usize, port: u32, flags: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .net_open, len, port);
-    defer traceAbiExit(s, .net_open, ov.@"error", flags);
-    net_ops.netOpen(s, ov, addr, len, port, flags);
+    net_ops.netOpen(statePtr(), ov, addr, len, port, flags);
 }
 
 fn abiNetAccept(ov: *pal_abi.Overlapped, listener: u64) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .net_accept, listener, 0);
-    defer traceAbiExit(s, .net_accept, ov.@"error", 0);
-    net_ops.netAccept(s, ov, listener);
+    net_ops.netAccept(statePtr(), ov, listener);
 }
 
 fn abiNetLookup(ov: *pal_abi.Overlapped, name: [*]const u8, len: usize, out: [*]u8, cap: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .net_lookup, len, cap);
-    defer traceAbiExit(s, .net_lookup, ov.@"error", 0);
-    net_ops.netLookup(s, ov, name, len, out, cap);
+    net_ops.netLookup(statePtr(), ov, name, len, out, cap);
 }
 
 fn abiNetCertVerify(ov: *pal_abi.Overlapped, name: [*]const u8, n_len: usize, chain: [*]const u8, c_len: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .net_cert_verify, n_len, c_len);
-    defer traceAbiExit(s, .net_cert_verify, ov.@"error", 0);
-    net_ops.netCertVerify(s, ov, name, n_len, chain, c_len);
+    net_ops.netCertVerify(statePtr(), ov, name, n_len, chain, c_len);
 }
 
 fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg: [*]const u8, len: usize) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .process_spawn, len, 0);
-    defer traceAbiExit(s, .process_spawn, ov.@"error", 0);
-    proc_tty.processSpawn(s, ov, cfg, len);
+    proc_tty.processSpawn(statePtr(), ov, cfg, len);
 }
 
 fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .process_pipe, 0, 0);
-    defer traceAbiExit(s, .process_pipe, ov.@"error", 0);
-    proc_tty.processPipe(s, ov);
+    proc_tty.processPipe(statePtr(), ov);
 }
 
 fn abiProcessWait(ov: *pal_abi.Overlapped, proc_handle: u64) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .process_wait, proc_handle, 0);
-    defer traceAbiExit(s, .process_wait, ov.@"error", 0);
-    proc_tty.processWait(s, ov, proc_handle);
+    proc_tty.processWait(statePtr(), ov, proc_handle);
 }
 
 fn abiProcessSignal(proc_handle: u64, signum: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .process_signal, proc_handle, signum);
-    defer traceAbiExit(s, .process_signal, proc_handle, signum);
-    proc_tty.processSignal(s, proc_handle, signum);
+    proc_tty.processSignal(statePtr(), proc_handle, signum);
 }
 
-fn abiSignalWait(ov: *pal_abi.Overlapped, sig: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .signal_wait, sig, 0);
-    defer traceAbiExit(s, .signal_wait, pal_abi.ERROR_UNSUPPORTED, 0);
+fn abiSignalWait(ov: *pal_abi.Overlapped, _: u32) callconv(win.win_cc) void {
     mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
 }
 
 fn abiTtySetMode(handle: u64, raw_mode: u32) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .tty_set_mode, handle, raw_mode);
-    defer traceAbiExit(s, .tty_set_mode, handle, raw_mode);
-    proc_tty.ttySetMode(s, handle, raw_mode);
+    proc_tty.ttySetMode(statePtr(), handle, raw_mode);
 }
 
 fn abiTtyGetSize(handle: u64) callconv(win.win_cc) u32 {
-    const s = statePtr();
-    traceAbiEnter(s, .tty_get_size, handle, 0);
-    const sz = proc_tty.ttyGetSize(s, handle);
-    traceAbiExit(s, .tty_get_size, sz, 0);
-    return sz;
+    return proc_tty.ttyGetSize(statePtr(), handle);
 }
 
-fn abiTtySetSize(handle: u64, cols: u32, rows: u32) callconv(win.win_cc) u32 {
-    const s = statePtr();
-    traceAbiEnter(s, .tty_set_size, handle, (@as(u64, cols) << 32) | rows);
-    traceAbiExit(s, .tty_set_size, 0, 0);
+fn abiTtySetSize(_: u64, _: u32, _: u32) callconv(win.win_cc) u32 {
     return 0;
 }
 
 fn abiFdIsatty(handle: u32) callconv(win.win_cc) u32 {
-    const s = statePtr();
-    traceAbiEnter(s, .fd_isatty, handle, 0);
-    const res = proc_tty.fdIsatty(s, handle);
-    traceAbiExit(s, .fd_isatty, res, 0);
-    return res;
+    return proc_tty.fdIsatty(statePtr(), handle);
 }
 
 fn abiSystemInfoWait(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
-    const s = statePtr();
-    traceAbiEnter(s, .system_info_wait, 0, 0);
-    defer traceAbiExit(s, .system_info_wait, pal_abi.ERROR_UNSUPPORTED, 0);
     mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
 }
 
@@ -1024,9 +848,6 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
     s.* = .{};
     s.host = hostPtr().*;
     if (!initKernel32(s)) return 10;
-    if (comptime trace_enabled) {
-        trace.init(s);
-    }
 
     const runtime_ptr = s.host.runtime_slice orelse return 11;
     const runtime_len = s.host.runtime_slice_size;
@@ -1050,47 +871,32 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
     const RuntimeEntry = *const fn () callconv(win.win_cc) void;
     const entry: RuntimeEntry = @ptrCast(@alignCast(code_ptr));
 
-    var loop_iter: u64 = 0;
     while (true) {
-        loop_iter += 1;
-        traceEvent(s, .loop_entry_enter, 0, s.pending_count, loop_iter);
         entry();
-        traceEvent(s, .loop_entry_exit, 0, s.pending_count, loop_iter);
         if (s.pending_count == 0) break;
 
         // Compute earliest timer deadline
         const now = if (s.p_get_tick_count64) |gtc| gtc() else 0;
         var timeout_ms: u32 = 0xffff_ffff;
         var fired_timer = false;
-        var active_timers: u64 = 0;
-        var fired_count: u64 = 0;
         for (&s.ops) |*op| {
             if (op.used and op.kind == .timer) {
-                active_timers += 1;
                 if (op.deadline_ms <= now) {
                     const gov = op.guest_ov.?;
-                    const late_ms = now - op.deadline_ms;
-                    const deadline = op.deadline_ms;
                     mem.freeOp(s, op);
                     mem.completeInline(gov, 0, 0, 0);
-                    traceEvent(s, .loop_timer_fire, 0, deadline, late_ms);
                     fired_timer = true;
-                    fired_count += 1;
                 } else {
                     const rem: u32 = @intCast(@min(op.deadline_ms - now, 0xffff_fffe));
                     if (rem < timeout_ms) timeout_ms = rem;
                 }
             }
         }
-        traceEvent(s, .loop_timer_scan, 0, active_timers, fired_count);
         if (fired_timer) continue;
 
         var entries: [32]win.OverlappedEntry = @splat(.{});
         var removed: u32 = 0;
-        traceEvent(s, .loop_iocp_enter, 0, timeout_ms, s.pending_count);
-        const iocp_ok = s.p_get_queued_ex.?(s.iocp, &entries, entries.len, &removed, timeout_ms, 0);
-        traceEvent(s, .loop_iocp_exit, 0, removed, @intCast(iocp_ok));
-        if (iocp_ok != 0) {
+        if (s.p_get_queued_ex.?(s.iocp, &entries, entries.len, &removed, timeout_ms, 0) != 0) {
             for (entries[0..removed]) |e| {
                 const win_ov = e.overlapped orelse continue;
                 const op: *mem.PendingOp = @fieldParentPtr("win_ov", win_ov);
@@ -1122,7 +928,6 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
                 const guest_ov = op.guest_ov;
                 const raw_sock = op.win_ov.internal_high;
                 const worker_handle = op.worker_handle;
-                traceEvent(s, .loop_iocp_item, @intFromBool(canceled), @intFromEnum(kind), transferred);
                 if (op.advance_seq) {
                     if (mem.findHandle(s, op.handle_token)) |he| {
                         if (op.append_write and op.win_error == 0) {
@@ -1164,10 +969,6 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
                 }
             }
         }
-    }
-    if (comptime trace_enabled) {
-        trace.record(s, .process_exit, 1, 0, @atomicLoad(u32, &s.trace_count, .acquire));
-        trace.dump(s);
     }
     return 0;
 }
