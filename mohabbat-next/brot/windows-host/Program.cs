@@ -166,8 +166,14 @@ internal static class Program
 
             PlatformEntry entry =
                 Marshal.GetDelegateForFunctionPointer<PlatformEntry>(platformCode);
-            PrecommitStack();
-            int status = entry();
+            int status = 0;
+            var worker = new System.Threading.Thread(() =>
+            {
+                PrecommitStack();
+                status = entry();
+            }, 16 * 1024 * 1024);
+            worker.Start();
+            worker.Join();
             Console.Error.WriteLine(
                 "Windows platform abstraction returned unexpectedly (status {0}).",
                 status);

@@ -115,6 +115,18 @@ pub const PalState = struct {
     p_post_queued: ?*const fn (win.HANDLE, u32, usize, ?*win.WinOverlapped) callconv(win.win_cc) i32 = null,
     p_create_thread: ?*const fn (?*anyopaque, usize, *const fn (?*anyopaque) callconv(win.win_cc) u32, ?*anyopaque, u32, ?*u32) callconv(win.win_cc) win.HANDLE = null,
     p_get_file_type: ?*const fn (win.HANDLE) callconv(win.win_cc) u32 = null,
+
+    // Optional PAL trace slab (populated only when pal_trace_options.enabled is true)
+    p_qpc: ?*const fn (*u64) callconv(win.win_cc) i32 = null,
+    p_qpf: ?*const fn (*u64) callconv(win.win_cc) i32 = null,
+    p_get_current_thread_id: ?*const fn () callconv(win.win_cc) u32 = null,
+    trace_buf: ?[*]u8 = null,
+    trace_cap: u32 = 0,
+    trace_count: u32 = 0,
+    trace_stopped: u32 = 0,
+    trace_dropped: u32 = 0,
+    trace_qpc_freq: u64 = 0,
+    trace_qpc_start: u64 = 0,
 };
 
 pub fn resolveKernel32(s: *PalState, name: [*:0]const u8) ?*anyopaque {

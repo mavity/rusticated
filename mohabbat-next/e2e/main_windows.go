@@ -57,9 +57,11 @@ type config struct {
 	fastText       string
 	fastInterval   time.Duration
 	editText       string
-	sampleInterval time.Duration
-	threadInterval time.Duration
-	drainDuration  time.Duration
+	sampleInterval         time.Duration
+	threadInterval         time.Duration
+	drainDuration          time.Duration
+	cooperativeExit        bool
+	cooperativeExitTimeout time.Duration
 }
 
 type event struct {
@@ -387,6 +389,8 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.sampleInterval, "sample-interval", 100*time.Millisecond, "Process counter sample interval")
 	flag.DurationVar(&cfg.threadInterval, "thread-sample-interval", time.Second, "Thread ID/count enumeration interval")
 	flag.DurationVar(&cfg.drainDuration, "drain", time.Second, "Time to collect output after the final typing burst")
+	flag.BoolVar(&cfg.cooperativeExit, "cooperative-exit", true, "Send Ctrl+C then 'exit' + Enter to trigger clean shutdown before falling back to Kill")
+	flag.DurationVar(&cfg.cooperativeExitTimeout, "cooperative-exit-timeout", 10*time.Second, "Maximum wait for cooperative exit before terminating")
 	flag.Parse()
 	return cfg
 }
@@ -645,6 +649,30 @@ func run(cfg config) (runErr error) {
 		result = processState.result
 		exited = true
 	default:
+	}
+	if !exited && cfg.cooperativeExit {
+		if err := log.emit("process.cooperative_exit_requested", "harness", "mohabbat/pty.PTY.Write", pid, map[string]any{
+			"sequence": []string{"ctrl+c", "exit\\r"},
+			"timeout":  cfg.cooperativeExitTimeout.String(),
+		}); err != nil {
+			return err
+		}
+		_, _ = terminal.Write([]byte{0x03})
+		time.Sleep(50 * time.Millisecond)
+		for _, b := range []byte("exit\r") {
+			if _, werr := terminal.Write([]byte{b}); werr != nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		timer := time.NewTimer(cfg.cooperativeExitTimeout)
+		select {
+		case <-processState.done:
+			timer.Stop()
+			result = processState.result
+			exited = true
+		case <-timer.C:
+		}
 	}
 	if !exited {
 		if err := log.emit("process.terminate_requested", "harness", "os.Process.Kill", pid, map[string]any{

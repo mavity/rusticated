@@ -150,7 +150,7 @@ pub fn runtimeActivation() callconv(pal_abi.pal_cc) void {
 
         g.linker = zwasm.Linker.init(&g.engine);
         wasm_env.registerAll(&g.linker) catch panicMsg("zwasm: Linker.registerAll failed");
-        g.instance = g.linker.instantiate(&g.module, .{ .fuel = .unmetered }) catch panicMsg("zwasm: Linker.instantiate failed");
+        g.instance = g.linker.instantiate(&g.module, .{ .fuel = .unmetered, .engine = .jit }) catch panicMsg("zwasm: Linker.instantiate failed");
     }
 
     invokeEntry(g);

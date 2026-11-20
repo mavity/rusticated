@@ -1007,6 +1007,545 @@ const freestanding_fixed_mem = if (builtin.os.tag == .freestanding) struct {
     }
     if (b.reservation) |res| {`,
 		},
+		// 12. Enable .jit engine on Linker + raise jit_host_bridge MAX_ARITY to 8
+		{
+			file: "src/api/handles.zig",
+			old: `pub const HostFuncPayload = struct {
+    callback: ?WasmFuncCallback = null,
+    callback_env: ?WasmFuncCallbackEnv = null,
+    env: ?*anyopaque = null,
+    finalizer: ?*const fn (?*anyopaque) callconv(.c) void = null,
+    params: []zir.ValType,
+    results: []zir.ValType,
+};`,
+			new: `pub const JitCallbackFn = *const fn (*anyopaque, *anyopaque, []const Val, []Val) ?*anyopaque;
+
+pub const HostFuncPayload = struct {
+    callback: ?WasmFuncCallback = null,
+    callback_env: ?WasmFuncCallbackEnv = null,
+    jit_callback: ?JitCallbackFn = null,
+    env: ?*anyopaque = null,
+    finalizer: ?*const fn (?*anyopaque) callconv(.c) void = null,
+    params: []zir.ValType,
+    results: []zir.ValType,
+};`,
+		},
+		{
+			file: "src/api/jit_host_bridge.zig",
+			old: `const MAX_ARITY = 4;`,
+			new: `const MAX_ARITY = 8;`,
+		},
+		{
+			file: "src/api/jit_host_bridge.zig",
+			old: `    const trap: ?*Trap =
+        if (payload.callback_env) |cb|
+            cb(payload.env, &args_vec, &res_vec)
+        else if (payload.callback) |cb|
+            cb(&args_vec, &res_vec)
+        else
+            return trapResult(rt, r);`,
+			new: `    const trap: ?*Trap =
+        if (payload.jit_callback) |jcb|
+            @ptrCast(@alignCast(jcb(@ptrCast(rt), payload.env.?, args, res_storage[0..nr])))
+        else if (payload.callback_env) |cb|
+            cb(payload.env, &args_vec, &res_vec)
+        else if (payload.callback) |cb|
+            cb(&args_vec, &res_vec)
+        else
+            return trapResult(rt, r);`,
+		},
+		{
+			file: "src/api/jit_host_bridge.zig",
+			old: `fn t4(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}`,
+			new: `fn t4(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}
+fn t5(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3, a4 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}
+fn t6(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3, a4, a5 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}
+fn t7(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3, a4, a5, a6 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}
+fn t8(comptime K: usize, comptime r: RetKind) *const fn (*JitRuntime, u64, u64, u64, u64, u64, u64, u64, u64) callconv(.c) RT(r) {
+    return &struct {
+        fn f(rt: *JitRuntime, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64) callconv(.c) RT(r) {
+            const a = [_]u64{ a0, a1, a2, a3, a4, a5, a6, a7 };
+            return bridge(rt, K, &a, r);
+        }
+    }.f;
+}`,
+		},
+		{
+			file: "src/api/jit_host_bridge.zig",
+			old: `            4 => ptrFor(t4, r, idx),
+            else => null,`,
+			new: `            4 => ptrFor(t4, r, idx),
+            5 => ptrFor(t5, r, idx),
+            6 => ptrFor(t6, r, idx),
+            7 => ptrFor(t7, r, idx),
+            8 => ptrFor(t8, r, idx),
+            else => null,`,
+		},
+		{
+			file: "src/zwasm/memory.zig",
+			old: `const _runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2; ` + "`lib`" + `-exempt)`,
+			new: `const _runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2; ` + "`lib`" + `-exempt)
+const _jit_abi = @import("../engine/codegen/shared/jit_abi.zig");`,
+		},
+		{
+			file: "src/zwasm/memory.zig",
+			old: `    pub const Backing = union(enum) {
+        interp: *_runtime.Runtime,
+        jit: *_runner.JitInstance,
+    };`,
+			new: `    pub const Backing = union(enum) {
+        interp: *_runtime.Runtime,
+        jit: *_runner.JitInstance,
+        jit_rt: *_jit_abi.JitRuntime,
+    };`,
+		},
+		{
+			file: "src/zwasm/memory.zig",
+			old: `            .jit => |jit| jit.owned.rt.vm_base[0..jit.owned.rt.mem_limit],`,
+			new: `            .jit => |jit| jit.owned.rt.vm_base[0..jit.owned.rt.mem_limit],
+            .jit_rt => |jrt| jrt.vm_base[0..jrt.mem_limit],`,
+		},
+		{
+			file: "src/zwasm/caller.zig",
+			old: `const _runtime = @import("../runtime/runtime.zig");
+const _memory = @import("memory.zig");
+
+pub const Caller = struct {
+    rt: *_runtime.Runtime,
+    /// Host context registered with the import via ` + "`Linker.defineFuncCtx`" + `
+    /// (wasmtime's ` + "`Caller::data`" + `). Null for ` + "`defineFunc`" + `-registered host fns
+    /// that need no external state. Recover the typed pointer via ` + "`data`" + `.
+    host_data: ?*anyopaque = null,
+
+    pub fn memory(self: Caller) ?_memory.Memory {
+        if (self.rt.memory.len == 0) return null;
+        // Linker host-fn path is interp-only (ADR-0200): wrap the runtime.
+        return .{ .backing = .{ .interp = self.rt } };
+    }
+
+    pub fn allocator(self: Caller) std.mem.Allocator {
+        return self.rt.alloc;
+    }`,
+			new: `const _runtime = @import("../runtime/runtime.zig");
+const _jit_abi = @import("../engine/codegen/shared/jit_abi.zig");
+const _memory = @import("memory.zig");
+
+pub const Caller = struct {
+    rt: ?*_runtime.Runtime = null,
+    jit_rt: ?*_jit_abi.JitRuntime = null,
+    host_data: ?*anyopaque = null,
+
+    pub fn memory(self: Caller) ?_memory.Memory {
+        if (self.jit_rt) |jrt| {
+            if (jrt.mem_limit == 0) return null;
+            return .{ .backing = .{ .jit_rt = jrt } };
+        }
+        const rt = self.rt orelse return null;
+        if (rt.memory.len == 0) return null;
+        return .{ .backing = .{ .interp = rt } };
+    }
+
+    pub fn allocator(self: Caller) std.mem.Allocator {
+        return self.rt.?.alloc;
+    }`,
+		},
+		{
+			file: "src/zwasm/host_func_marshal.zig",
+			old: `const _caller = @import("caller.zig");
+
+pub const Caller = _caller.Caller;`,
+			new: `const _caller = @import("caller.zig");
+const _api_handles = @import("../api/handles.zig");
+const _jit_abi = @import("../engine/codegen/shared/jit_abi.zig");
+
+pub const Caller = _caller.Caller;`,
+		},
+		{
+			file: "src/zwasm/host_func_marshal.zig",
+			old: `/// A RUNTIME-arity host fn:`,
+			new: `fn valToZig(comptime T: type, v: _api_handles.Val) T {
+    return switch (T) {
+        i32 => v.of.i32,
+        u32 => @bitCast(v.of.i32),
+        i64 => v.of.i64,
+        u64 => @bitCast(v.of.i64),
+        f32 => v.of.f32,
+        f64 => v.of.f64,
+        else => @compileError("host fn: unsupported param type " ++ @typeName(T)),
+    };
+}
+
+fn zigToVal(comptime T: type, v: T) _api_handles.Val {
+    return switch (T) {
+        i32 => .{ .kind = .i32, .of = .{ .i32 = v } },
+        u32 => .{ .kind = .i32, .of = .{ .i32 = @bitCast(v) } },
+        i64 => .{ .kind = .i64, .of = .{ .i64 = v } },
+        u64 => .{ .kind = .i64, .of = .{ .i64 = @bitCast(v) } },
+        f32 => .{ .kind = .f32, .of = .{ .f32 = v } },
+        f64 => .{ .kind = .f64, .of = .{ .f64 = v } },
+        else => @compileError("host fn: unsupported result type " ++ @typeName(T)),
+    };
+}
+
+pub fn jitThunkFor(comptime Sig: type) _api_handles.JitCallbackFn {
+    const fn_info = @typeInfo(Sig).@"fn";
+    return struct {
+        fn t(jit_rt_raw: *anyopaque, ctx: *anyopaque, args_vals: []const _api_handles.Val, res_vals: []_api_handles.Val) ?*anyopaque {
+            const wrapper: *HostFnCtx(Sig) = @ptrCast(@alignCast(ctx));
+            const jrt: *_jit_abi.JitRuntime = @ptrCast(@alignCast(jit_rt_raw));
+            const ArgsT = std.meta.ArgsTuple(Sig);
+            var args: ArgsT = undefined;
+            inline for (1..fn_info.param_types.len) |i| {
+                const PT = fn_info.param_types[i].?;
+                args[i] = valToZig(PT, args_vals[i - 1]);
+            }
+            var caller: Caller = .{ .jit_rt = jrt, .host_data = wrapper.host_data };
+            args[0] = &caller;
+            const ret = @call(.auto, wrapper.user_fn, args);
+            const Ret = fn_info.return_type.?;
+            if (Ret == void) return null;
+            switch (@typeInfo(Ret)) {
+                .error_union => |eu| {
+                    const ok = ret catch return @ptrFromInt(1);
+                    if (eu.payload != void) res_vals[0] = zigToVal(eu.payload, ok);
+                },
+                else => res_vals[0] = zigToVal(Ret, ret),
+            }
+            return null;
+        }
+    }.t;
+}
+
+/// A RUNTIME-arity host fn:`,
+		},
+		{
+			file: "src/api/instance.zig",
+			old: `fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {`,
+			new: `pub fn hostFuncThunkPtr() *const fn (*runtime.Runtime, *anyopaque) anyerror!void {
+    return &hostFuncThunk;
+}
+
+fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {`,
+		},
+		{
+			file: "src/zwasm/linker.zig",
+			old: `    pub const HostFuncEntry = struct {
+        thunk_fn: *const fn (*_runtime.Runtime, *anyopaque) anyerror!void,
+        ctx: *anyopaque,
+        params: []const _zir.ValType,
+        results: []const _zir.ValType,
+    };`,
+			new: `    pub const HostFuncEntry = struct {
+        thunk_fn: *const fn (*_runtime.Runtime, *anyopaque) anyerror!void,
+        jit_thunk_fn: ?_api_handles.JitCallbackFn = null,
+        ctx: *anyopaque,
+        params: []const _zir.ValType,
+        results: []const _zir.ValType,
+    };`,
+		},
+		{
+			file: "src/zwasm/linker.zig",
+			old: `const _api_instance = @import("../api/instance.zig");`,
+			new: `const _api_instance = @import("../api/instance.zig");
+const _api_handles = @import("../api/handles.zig");`,
+		},
+		{
+			file: "src/zwasm/linker.zig",
+			old: `            .payload = .{ .host_func = .{
+                .thunk_fn = _marshal.thunkFor(Sig),
+                .ctx = ctx_ptr,
+                .params = sig.params,
+                .results = sig.results,
+            } },`,
+			new: `            .payload = .{ .host_func = .{
+                .thunk_fn = _marshal.thunkFor(Sig),
+                .jit_thunk_fn = _marshal.jitThunkFor(Sig),
+                .ctx = ctx_ptr,
+                .params = sig.params,
+                .results = sig.results,
+            } },`,
+		},
+		{
+			file: "src/zwasm/linker.zig",
+			old: `                                bindings_list.append(scratch, .{
+                                    .func = .{
+                                        .host_call = .{ .fn_ptr = host.thunk_fn, .ctx = host.ctx },
+                                        .source = .wasi,
+                                    },
+                                }) catch return error.OutOfMemory;`,
+			new: `                                if (opts.engine != .interp and host.jit_thunk_fn != null) {
+                                    const payload = self.engine.alloc.create(_api_handles.HostFuncPayload) catch return error.OutOfMemory;
+                                    payload.* = .{
+                                        .jit_callback = host.jit_thunk_fn,
+                                        .env = host.ctx,
+                                        .params = @constCast(host.params),
+                                        .results = @constCast(host.results),
+                                    };
+                                    self.ctx_storage.append(self.engine.alloc, .{
+                                        .ptr = payload,
+                                        .destroy_fn = struct {
+                                            fn d(a: Allocator, p: *anyopaque) void {
+                                                a.destroy(@as(*_api_handles.HostFuncPayload, @ptrCast(@alignCast(p))));
+                                            }
+                                        }.d,
+                                    }) catch return error.OutOfMemory;
+                                    bindings_list.append(scratch, .{
+                                        .func = .{
+                                            .host_call = .{ .fn_ptr = _api_instance.hostFuncThunkPtr(), .ctx = payload },
+                                            .source = .wasi,
+                                        },
+                                    }) catch return error.OutOfMemory;
+                                } else {
+                                    bindings_list.append(scratch, .{
+                                        .func = .{
+                                            .host_call = .{ .fn_ptr = host.thunk_fn, .ctx = host.ctx },
+                                            .source = .wasi,
+                                        },
+                                    }) catch return error.OutOfMemory;
+                                }`,
+		},
+		{
+			file: "src/zwasm/linker.zig",
+			old: `        const inst_ptr = _api_instance.instantiateInternal(mod.c_store, mod.c_handle, pre.asBuilder(), null, limits, .interp) orelse return error.InstantiateFailed;`,
+			new: `        const inst_ptr = _api_instance.instantiateInternal(mod.c_store, mod.c_handle, pre.asBuilder(), null, limits, opts.engine) orelse return error.InstantiateFailed;`,
+		},
+		// 13. Periodic AArch64 veneer islands in codegen/shared/linker.zig for >128 MiB JIT modules
+		{
+			file: "src/engine/codegen/shared/linker.zig",
+			old: `    var total_size: usize = 0;
+    var offsets = try allocator.alloc(u32, total_funcs);
+    errdefer allocator.free(offsets);
+    // Imports occupy slots [0..num_imports); fill with sentinel.
+    @memset(offsets[0..num_imports], IMPORT_SENTINEL_OFFSET);
+    for (func_bodies, 0..) |body, i| {
+        offsets[num_imports + i] = @intCast(total_size);
+        total_size += body.bytes.len;
+        // Bodies emit only word-aligned content; no padding needed.
+    }
+    if (total_size == 0) return Error.AllocationFailed;
+
+    var block = try jit_mem.alloc(total_size);
+    errdefer jit_mem.free(block);
+
+    try jit_mem.setWritable(block);
+    for (func_bodies, 0..) |body, i| {
+        const off = offsets[num_imports + i];
+        @memcpy(block.bytes[off..][0..body.bytes.len], body.bytes);
+    }
+
+    // Patch every CALL/BL placeholder. Each fixup's byte_offset
+    // is function-local; add the function's own base offset to
+    // get its absolute byte position. The encoding differs per
+    // arch (BL imm26 on ARM64; CALL rel32 on x86_64) — comptime
+    // switch picks the right path with no runtime cost.
+    for (func_bodies, 0..) |body, i| {
+        const base = offsets[num_imports + i];
+        for (body.call_fixups) |fx| {
+            // CallFixups carry wasm-space indices. Imports are
+            // routed via the trap stub by the emit pass — they
+            // must never appear here. A sentinel target is a
+            // structural emit-pass bug (post-chunk-b invariant).
+            if (fx.target_func_idx >= total_funcs) return Error.UnknownCallTarget;
+            if (fx.target_func_idx < num_imports) return Error.UnknownCallTarget;
+            const fixup_abs: i64 = @as(i64, base) + @as(i64, fx.byte_offset);
+            const target_abs: i64 = offsets[fx.target_func_idx];
+            switch (builtin_arch.target.cpu.arch) {
+                .aarch64 => {
+                    const disp_bytes = target_abs - fixup_abs;
+                    if (@rem(disp_bytes, 4) != 0) return Error.DisplacementOverflow;
+                    const disp_words = @divExact(disp_bytes, 4);
+                    // imm26 signed range: ±2^25 words = ±128 MiB.
+                    if (disp_words < -(1 << 25) or disp_words >= (1 << 25)) {
+                        return Error.DisplacementOverflow;
+                    }
+                    // ADR-0112 D4: ` + "`is_tail = true`" + ` → B (0x14...);
+                    // otherwise BL (0x94...). Same imm26 layout.
+                    const new_word = if (fx.is_tail)
+                        inst.encB(@intCast(disp_words))
+                    else
+                        inst.encBL(@intCast(disp_words));
+                    std.mem.writeInt(u32, block.bytes[@intCast(fixup_abs)..][0..4], new_word, .little);
+                },
+                .x86_64 => {
+                    // CALL rel32: 5-byte instruction (0xE8 +
+                    // disp32). disp = target - (at + 5). i32
+                    // signed range = ±2 GiB; flag overflow.
+                    const disp_bytes = target_abs - fixup_abs - 5;
+                    if (disp_bytes < std.math.minInt(i32) or disp_bytes > std.math.maxInt(i32)) {
+                        return Error.DisplacementOverflow;
+                    }
+                    inst.patchRel32(block.bytes, @intCast(fixup_abs), 5, @intCast(disp_bytes));
+                },
+                else => @compileError("unsupported host arch for linker patch loop"),
+            }
+        }
+    }`,
+			new: `    var total_size: usize = 0;
+    var offsets = try allocator.alloc(u32, total_funcs);
+    errdefer allocator.free(offsets);
+    // Imports occupy slots [0..num_imports); fill with sentinel.
+    @memset(offsets[0..num_imports], IMPORT_SENTINEL_OFFSET);
+    for (func_bodies, 0..) |body, i| {
+        offsets[num_imports + i] = @intCast(total_size);
+        total_size += body.bytes.len;
+    }
+    if (total_size == 0) return Error.AllocationFailed;
+
+    const island_stride: usize = 64 * 1024 * 1024;
+    const veneer_thresh: i64 = 48 * 1024 * 1024;
+    const veneer_size: usize = 16;
+    const use_islands = builtin_arch.target.cpu.arch == .aarch64 and total_size > 120 * 1024 * 1024;
+
+    var island_cursors: []usize = &.{};
+    var island_ends: []usize = &.{};
+    var func_chunk: []u32 = &.{};
+    defer if (use_islands) {
+        allocator.free(island_cursors);
+        allocator.free(island_ends);
+        allocator.free(func_chunk);
+    };
+
+    if (use_islands) {
+        const num_chunks = (total_size / island_stride) + 1;
+        const island_caps = try allocator.alloc(usize, num_chunks);
+        defer allocator.free(island_caps);
+        @memset(island_caps, 0);
+
+        island_cursors = try allocator.alloc(usize, num_chunks);
+        island_ends = try allocator.alloc(usize, num_chunks);
+        func_chunk = try allocator.alloc(u32, func_bodies.len);
+
+        for (func_bodies, 0..) |body, i| {
+            const raw_base = offsets[num_imports + i];
+            const c: usize = @intCast(raw_base / island_stride);
+            func_chunk[i] = @intCast(c);
+            for (body.call_fixups) |fx| {
+                if (fx.target_func_idx >= total_funcs or fx.target_func_idx < num_imports) return Error.UnknownCallTarget;
+                const raw_fixup: i64 = @as(i64, raw_base) + @as(i64, fx.byte_offset);
+                const raw_target: i64 = offsets[fx.target_func_idx];
+                const dist = if (raw_target >= raw_fixup) raw_target - raw_fixup else raw_fixup - raw_target;
+                if (dist > veneer_thresh) {
+                    island_caps[c] += 1;
+                }
+            }
+        }
+
+        total_size = 0;
+        var cur_chunk: usize = 0;
+        for (func_bodies, 0..) |body, i| {
+            const c: usize = func_chunk[i];
+            if (c > cur_chunk) {
+                while (cur_chunk < c) : (cur_chunk += 1) {
+                    total_size = (total_size + 7) & ~@as(usize, 7);
+                    island_cursors[cur_chunk] = total_size;
+                    total_size += island_caps[cur_chunk] * veneer_size;
+                    island_ends[cur_chunk] = total_size;
+                }
+            }
+            offsets[num_imports + i] = @intCast(total_size);
+            total_size += body.bytes.len;
+        }
+        while (cur_chunk < num_chunks) : (cur_chunk += 1) {
+            total_size = (total_size + 7) & ~@as(usize, 7);
+            island_cursors[cur_chunk] = total_size;
+            total_size += island_caps[cur_chunk] * veneer_size;
+            island_ends[cur_chunk] = total_size;
+        }
+    }
+
+    var block = try jit_mem.alloc(total_size);
+    errdefer jit_mem.free(block);
+
+    try jit_mem.setWritable(block);
+    for (func_bodies, 0..) |body, i| {
+        const off = offsets[num_imports + i];
+        @memcpy(block.bytes[off..][0..body.bytes.len], body.bytes);
+    }
+
+    for (func_bodies, 0..) |body, i| {
+        const base = offsets[num_imports + i];
+        for (body.call_fixups) |fx| {
+            if (fx.target_func_idx >= total_funcs) return Error.UnknownCallTarget;
+            if (fx.target_func_idx < num_imports) return Error.UnknownCallTarget;
+            const fixup_abs: i64 = @as(i64, base) + @as(i64, fx.byte_offset);
+            const target_abs: i64 = offsets[fx.target_func_idx];
+            switch (builtin_arch.target.cpu.arch) {
+                .aarch64 => {
+                    var disp_bytes = target_abs - fixup_abs;
+                    if (@rem(disp_bytes, 4) != 0) return Error.DisplacementOverflow;
+                    var disp_words = @divExact(disp_bytes, 4);
+                    if (disp_words < -(1 << 25) or disp_words >= (1 << 25)) {
+                        if (!use_islands) return Error.DisplacementOverflow;
+                        const c: usize = func_chunk[i];
+                        const v_off = island_cursors[c];
+                        if (v_off + veneer_size > island_ends[c]) return Error.DisplacementOverflow;
+                        island_cursors[c] = v_off + veneer_size;
+
+                        const target_addr: u64 = @intFromPtr(block.bytes.ptr) + @as(u64, @intCast(target_abs));
+                        std.mem.writeInt(u32, block.bytes[v_off..][0..4], 0x58000050, .little); // LDR X16, #8
+                        std.mem.writeInt(u32, block.bytes[v_off + 4 ..][0..4], inst.encBr(16), .little); // BR X16
+                        std.mem.writeInt(u64, block.bytes[v_off + 8 ..][0..8], target_addr, .little);
+
+                        disp_bytes = @as(i64, @intCast(v_off)) - fixup_abs;
+                        if (@rem(disp_bytes, 4) != 0) return Error.DisplacementOverflow;
+                        disp_words = @divExact(disp_bytes, 4);
+                        if (disp_words < -(1 << 25) or disp_words >= (1 << 25)) {
+                            return Error.DisplacementOverflow;
+                        }
+                    }
+                    const new_word = if (fx.is_tail)
+                        inst.encB(@intCast(disp_words))
+                    else
+                        inst.encBL(@intCast(disp_words));
+                    std.mem.writeInt(u32, block.bytes[@intCast(fixup_abs)..][0..4], new_word, .little);
+                },
+                .x86_64 => {
+                    const disp_bytes = target_abs - fixup_abs - 5;
+                    if (disp_bytes < std.math.minInt(i32) or disp_bytes > std.math.maxInt(i32)) {
+                        return Error.DisplacementOverflow;
+                    }
+                    inst.patchRel32(block.bytes, @intCast(fixup_abs), 5, @intCast(disp_bytes));
+                },
+                else => @compileError("unsupported host arch for linker patch loop"),
+            }
+        }
+    }`,
+		},
 	}
 }
 
