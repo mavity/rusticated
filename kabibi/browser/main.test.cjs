@@ -2089,3 +2089,28 @@ test('bootFromGuest loads @xterm/addon-unicode-graphemes@0.4.0 and activates 15-
 
   mounted.dispose();
 });
+
+test('browser styles and mounted containers use overflow: clip and constrain xterm-helper-textarea for mobile', async () => {
+  const { document, window, context } = createHarness();
+  await context.KabibiBrowser.ensureBrowserStyles(document, { waitForStylesheet: false });
+
+  const baseStyle = (document.head || document.body).children.find(
+    (el) => el.tagName === 'STYLE' && el.attributes['data-kabibi-base-style'] === 'true'
+  );
+  assert.ok(baseStyle);
+  assert.match(baseStyle.textContent, /overflow:\s*hidden;\s*overflow:\s*clip;/);
+  assert.match(baseStyle.textContent, /\.xterm\s+\.xterm-helpers\s*\{[^}]*overflow:\s*clip;/);
+  assert.match(baseStyle.textContent, /\.xterm\s+\.xterm-helper-textarea\s*\{[^}]*max-width:\s*100%;[^}]*font-size:\s*16px;/);
+
+  const mounted = await context.KabibiBrowser.mount({
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  assert.equal(mounted.parent.style.overflow, 'clip');
+  assert.equal(mounted.root.style.overflow, 'clip');
+  assert.equal(mounted.root.children[0].style.overflow, 'clip');
+
+  mounted.dispose();
+});

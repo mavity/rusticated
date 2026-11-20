@@ -647,8 +647,11 @@
         style.setAttribute('data-kabibi-base-style', 'true');
       }
       style.textContent = [
-        'html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #07090e; }',
-        '.xterm { height: 100%; }'
+        'html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; overflow: clip; background: #07090e; }',
+        '.kabibi-terminal-root, .kabibi-xterm-container, .xterm { overflow: hidden; overflow: clip; }',
+        '.xterm { height: 100%; }',
+        '.xterm .xterm-helpers { left: 0; right: 0; max-width: 100%; overflow: hidden; overflow: clip; }',
+        '.xterm .xterm-helper-textarea { max-width: 100%; box-sizing: border-box; font-size: 16px; }'
       ].join('\n');
       styleTarget.appendChild(style);
     }
@@ -761,6 +764,7 @@
       zIndex: '0',
       background: '#07090e'
     });
+    host.style.overflow = 'clip';
     document.body.appendChild(host);
     return host;
   }
@@ -815,6 +819,7 @@
       minHeight: '0',
       overflow: 'hidden'
     });
+    root.style.overflow = 'clip';
     parent.appendChild(root);
     return root;
   }
@@ -1058,8 +1063,10 @@
     terminalContainer.className = 'kabibi-xterm-container';
     Object.assign(terminalContainer.style, {
       width: '100%',
-      height: '100%'
+      height: '100%',
+      overflow: 'hidden'
     });
+    terminalContainer.style.overflow = 'clip';
     root.appendChild(terminalContainer);
 
     const term = new dependencies.Terminal({
@@ -1227,7 +1234,7 @@
           : '';
       if (!text) return;
       startupOutput += text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-      const banner = /K\s*A\s*B\s*I\s*B\s*I\s*:\s*wearable all-weather shell\s+(v[^\s\x1b]+)[\t \r\n]/.exec(startupOutput);
+      const banner = /K\s*A\s*B\s*I\s*B\s*I\s*:\s*wearable shell\s+(v[^\s\x1b]+)[\t \r\n]/.exec(startupOutput);
       if (!banner) {
         if (startupOutput.length > 1024) startupOutput = startupOutput.slice(-1024);
         return;

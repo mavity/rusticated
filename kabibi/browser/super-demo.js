@@ -1068,6 +1068,7 @@
       background: 'radial-gradient(ellipse at 50% 45%, #17202d 0%, #07090e 68%)',
       touchAction: 'none'
     });
+    stage.style.overflow = 'clip';
 
     const canvas = document.createElement('canvas');
     canvas.setAttribute('aria-label', 'Kabibi terminal display');
