@@ -111,7 +111,7 @@ func formatStartupBannerWithAI(sessionErr error, aiEnabled bool) string {
 		"   - file manager (Escape)",
 	}
 	if aiEnabled {
-		lines = append(lines, "   - AI harness (ask anything in prompt) + /download to run on your local machine")
+		lines = append(lines, "   - AI in shell prompt + /download to your machine")
 	} else {
 		lines = append(lines, "   - /download to run on your local machine")
 	}
