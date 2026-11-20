@@ -107,9 +107,11 @@ func (o FetchOptions) progress(stage, details string, percent int) {
 // and returns its path. It is offline-first: a compatible cached extraction or
 // wheel is used before any network request to PyPI.
 func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
-	platform := InspectRuntimePlatform()
+	return ensureRuntimeForPlatform(ctx, opts, InspectRuntimePlatform())
+}
+
+func ensureRuntimeForPlatform(ctx context.Context, opts FetchOptions, platform RuntimePlatformInfo) (string, error) {
 	if platform.OS == "browser" {
-		opts.progress("runtime", "LiteRT-LM WebGPU eval bridge ready", 100)
 		return "eval", nil
 	}
 	if platform.OS == "android" {

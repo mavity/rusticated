@@ -246,9 +246,13 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		return err
 	}
 
+	sawDownload := false
 	opts := assets.FetchOptions{
 		CacheDir: cacheDir,
 		OnProgress: func(stage, details string, percent int) {
+			if stage == "download" || stage == "extract" {
+				sawDownload = true
+			}
 			if percent >= 0 {
 				r.emitFeedback(fmt.Sprintf("\r[%s] %s (%d%%)", stage, details, percent))
 			} else {
@@ -282,6 +286,9 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		modelPath, err = assets.EnsureModelTier(ctx, cfg.TierID, opts)
 		if err != nil {
 			return fmt.Errorf("model download error: %w", err)
+		}
+		if sawDownload && assets.HostOS() == "browser" {
+			r.emitFeedback("\r[runtime] LiteRT-LM WebGPU eval bridge ready (100%)")
 		}
 		chosenBackend = "auto"
 		if assets.HostOS() == "browser" {

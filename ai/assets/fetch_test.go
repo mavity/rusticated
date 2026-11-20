@@ -340,3 +340,21 @@ func TestExtractWheelNativeFilesPreservesPackagePaths(t *testing.T) {
 		t.Errorf("Python package file should not be extracted, stat error = %v", err)
 	}
 }
+
+func TestEnsureRuntimeBrowserDoesNotEmitProgress(t *testing.T) {
+	var events []string
+	lib, err := ensureRuntimeForPlatform(context.Background(), FetchOptions{
+		OnProgress: func(stage, details string, percent int) {
+			events = append(events, stage+":"+details)
+		},
+	}, RuntimePlatformInfo{OS: "browser", Arch: "wasm32", EnvironmentKind: "browser"})
+	if err != nil {
+		t.Fatalf("ensureRuntimeForPlatform() error = %v", err)
+	}
+	if lib != "eval" {
+		t.Fatalf("ensureRuntimeForPlatform() = %q, want %q", lib, "eval")
+	}
+	if len(events) != 0 {
+		t.Fatalf("unexpected progress events for browser runtime: %v", events)
+	}
+}
