@@ -1,6 +1,6 @@
 [package]
 name = "rusticated-test"
-version = "0.8.40"
+version = "0.8.42"
 edition = "2024"
 publish = false
 
