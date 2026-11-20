@@ -213,20 +213,6 @@ const browserAssetBootstrapJS = `
 
       (async () => {
         try {
-          const check = await this.checkCached(url);
-          if (check.cached) {
-            state.done = true;
-            state.cached = true;
-            state.received = check.size;
-            state.total = check.size;
-            state.percent = 100;
-            state.finalURL = check.finalURL || '';
-            state.httpStatus = check.httpStatus || 0;
-            state.contentType = check.contentType || '';
-            state.storedIn = check.source || '';
-            return;
-          }
-
           const fname = filenameOf(url);
           const root = await getOPFSDirectory();
           const urls = modelURLs(url);
@@ -372,10 +358,25 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 		return "", fmt.Errorf("bootstrap browser assets adapter: %w", err)
 	}
 
+	return ensureModelBrowserWithEval(ctx, url, opts, EvalJS)
+}
+
+func ensureModelBrowserWithEval(ctx context.Context, url string, opts FetchOptions, eval func(string) (string, error)) (string, error) {
 	filename := filepath.Base(url)
 
+	cache, err := checkBrowserModelCache(eval, url)
+	if err != nil {
+		return "", err
+	}
+	if cache.Cached {
+		if cache.Size > 0 {
+			recordBrowserModelSize(url, cache.Size)
+		}
+		return url, nil
+	}
+
 	startCode := fmt.Sprintf("globalThis.__rustica_assets.startDownload(%s)", strconv.Quote(url))
-	initProgressJSON, err := EvalJS(startCode)
+	initProgressJSON, err := eval(startCode)
 	if err != nil {
 		return "", fmt.Errorf("start browser model download: %w", err)
 	}
@@ -405,10 +406,10 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 		select {
 		case <-ctx.Done():
 			cancelCode := fmt.Sprintf("globalThis.__rustica_assets.cancelDownload(%s)", strconv.Quote(url))
-			_, _ = EvalJS(cancelCode)
+			_, _ = eval(cancelCode)
 			return "", ctx.Err()
 		case <-ticker.C:
-			pJSON, err := EvalJS(pollCode)
+			pJSON, err := eval(pollCode)
 			if err != nil {
 				return "", fmt.Errorf("poll browser download progress: %w", err)
 			}
@@ -449,24 +450,34 @@ func browserModelDownloadSize(url string, expectedSize int64) (int64, error) {
 }
 
 func estimateBrowserModelDownload(eval func(string) (string, error), url string, expectedSize int64) (int64, error) {
-	raw, err := eval(fmt.Sprintf("(async () => JSON.stringify(await globalThis.__rustica_assets.checkCached(%s)))()", strconv.Quote(url)))
+	cache, err := checkBrowserModelCache(eval, url)
 	if err != nil {
-		return 0, fmt.Errorf("check browser model cache: %w", err)
+		return 0, err
 	}
-	var result struct {
-		Cached bool  `json:"cached"`
-		Size   int64 `json:"size"`
-	}
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return 0, fmt.Errorf("decode browser model cache status: %w", err)
-	}
-	if result.Cached {
-		if result.Size > 0 {
-			recordBrowserModelSize(url, result.Size)
+	if cache.Cached {
+		if cache.Size > 0 {
+			recordBrowserModelSize(url, cache.Size)
 		}
 		return 0, nil
 	}
 	return expectedSize, nil
+}
+
+type browserModelCacheStatus struct {
+	Cached bool  `json:"cached"`
+	Size   int64 `json:"size"`
+}
+
+func checkBrowserModelCache(eval func(string) (string, error), url string) (browserModelCacheStatus, error) {
+	raw, err := eval(fmt.Sprintf("(async () => JSON.stringify(await globalThis.__rustica_assets.checkCached(%s)))()", strconv.Quote(url)))
+	if err != nil {
+		return browserModelCacheStatus{}, fmt.Errorf("check browser model cache: %w", err)
+	}
+	var status browserModelCacheStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return browserModelCacheStatus{}, fmt.Errorf("decode browser model cache status: %w", err)
+	}
+	return status, nil
 }
 
 var (
