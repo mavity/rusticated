@@ -40,6 +40,7 @@ const OpKind = enum(u8) {
     udp_read = 5,
     signal_wait = 6,
     system_info_wait = 7,
+    dns_lookup = 8,
 };
 
 const PendingOp = struct {
@@ -185,22 +186,39 @@ fn abiFreeMem(ptr: [*]u8, size: usize) callconv(pal_abi.pal_cc) void {
 
 fn abiFlushIcache(ptr: [*]const u8, size: usize) callconv(pal_abi.pal_cc) void {
     if (builtin.cpu.arch == .aarch64) {
-        const start = @intFromPtr(ptr) & ~@as(usize, 63);
-        const end = (@intFromPtr(ptr) + size + 63) & ~@as(usize, 63);
-        var addr = start;
-        while (addr < end) : (addr += 64) {
-            asm volatile ("dc cvau, %[addr]"
-                :
-                : [addr] "r" (addr),
-                : .{ .memory = true });
+        const ctr = asm ("mrs %[ret], ctr_el0"
+            : [ret] "=r" (-> usize),
+        );
+        const idc = (ctr & (1 << 28)) != 0;
+        const dic = (ctr & (1 << 29)) != 0;
+        if (idc and dic) {
+            asm volatile ("dsb ish\nisb" ::: .{ .memory = true });
+            return;
+        }
+        const d_line: usize = @as(usize, 4) << @intCast(ctr & 0xf);
+        const i_line: usize = @as(usize, 4) << @intCast((ctr >> 16) & 0xf);
+        if (!idc) {
+            const start = @intFromPtr(ptr) & ~(d_line - 1);
+            const end = (@intFromPtr(ptr) + size + d_line - 1) & ~(d_line - 1);
+            var addr = start;
+            while (addr < end) : (addr += d_line) {
+                asm volatile ("dc cvau, %[addr]"
+                    :
+                    : [addr] "r" (addr),
+                    : .{ .memory = true });
+            }
         }
         asm volatile ("dsb ish" ::: .{ .memory = true });
-        addr = start;
-        while (addr < end) : (addr += 64) {
-            asm volatile ("ic ivau, %[addr]"
-                :
-                : [addr] "r" (addr),
-                : .{ .memory = true });
+        if (!dic) {
+            const start = @intFromPtr(ptr) & ~(i_line - 1);
+            const end = (@intFromPtr(ptr) + size + i_line - 1) & ~(i_line - 1);
+            var addr = start;
+            while (addr < end) : (addr += i_line) {
+                asm volatile ("ic ivau, %[addr]"
+                    :
+                    : [addr] "r" (addr),
+                    : .{ .memory = true });
+            }
         }
         asm volatile ("dsb ish\nisb" ::: .{ .memory = true });
     }
@@ -469,6 +487,9 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
+            if (op.kind == .dns_lookup and op.fd >= 0) {
+                _ = sys.sys1(sys.NR.close, @intCast(op.fd));
+            }
             freeOp(s, op);
             completeInline(ov, pal_abi.ERROR_CANCELED, 0, 0);
             return;
@@ -1137,6 +1158,46 @@ fn writeNetLookupResult(out: [*]u8, cap: usize, families: []const u8, addrs_data
     return @intCast(total_size);
 }
 
+fn parseDnsResponse(r: []const u8, out: [*]u8, cap: usize) struct { err: u32, total: u32 } {
+    if (r.len < 12) return .{ .err = pal_abi.ERROR_NOENT, .total = 0 };
+    const qdcount = std.mem.readInt(u16, r[4..6], .big);
+    const ancount = std.mem.readInt(u16, r[6..8], .big);
+    var pos: usize = 12;
+    for (0..qdcount) |_| {
+        pos = skipDnsName(r, pos) orelse return .{ .err = pal_abi.ERROR_NOENT, .total = 0 };
+        if (pos + 4 > r.len) break;
+        pos += 4;
+    }
+    var families: [16]u8 = undefined;
+    var addr_bytes: [16 * 16]u8 = undefined;
+    var count: usize = 0;
+    var addr_off: usize = 0;
+    for (0..ancount) |_| {
+        pos = skipDnsName(r, pos) orelse break;
+        if (pos + 10 > r.len) break;
+        const rtype = std.mem.readInt(u16, r[pos..][0..2], .big);
+        const rdlen = std.mem.readInt(u16, r[pos + 8 ..][0..2], .big);
+        pos += 10;
+        if (pos + rdlen > r.len) break;
+        if (rtype == 1 and rdlen == 4 and count < families.len and addr_off + 4 <= addr_bytes.len) {
+            families[count] = 4;
+            @memcpy(addr_bytes[addr_off..][0..4], r[pos..][0..4]);
+            count += 1;
+            addr_off += 4;
+        } else if (rtype == 28 and rdlen == 16 and count < families.len and addr_off + 16 <= addr_bytes.len) {
+            families[count] = 6;
+            @memcpy(addr_bytes[addr_off..][0..16], r[pos..][0..16]);
+            count += 1;
+            addr_off += 16;
+        }
+        pos += rdlen;
+    }
+    if (count == 0) return .{ .err = pal_abi.ERROR_NOENT, .total = 0 };
+    const total = writeNetLookupResult(out, cap, families[0..count], addr_bytes[0..addr_off]);
+    if (total == 0) return .{ .err = pal_abi.ERROR_INVALID, .total = 0 };
+    return .{ .err = 0, .total = total };
+}
+
 fn abiNetLookup(ov: *pal_abi.Overlapped, name_ptr: [*]const u8, name_len: usize, out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) void {
     if (name_len == 0 or name_len > 255) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
@@ -1185,86 +1246,38 @@ fn abiNetLookup(ov: *pal_abi.Overlapped, name_ptr: [*]const u8, name_len: usize,
     pkt[qoff + 3] = 1; // QCLASS = IN
     const pkt_len = qoff + 4;
 
-    const sock_res = sys.sys3(sys.NR.socket, 2, 2 | 0o2000000, 17); // AF_INET, SOCK_DGRAM|SOCK_CLOEXEC, IPPROTO_UDP
+    const sock_res = sys.sys3(sys.NR.socket, 2, 2 | sys.O_NONBLOCK | 0o2000000, 17); // AF_INET, SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC, IPPROTO_UDP
     if (sys.isErr(sock_res) != null) {
         completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
         return;
     }
-    const fd: usize = sock_res;
-    defer _ = sys.sys1(sys.NR.close, fd);
+    const fd: i32 = @intCast(sock_res);
 
     var sa: sys.SockAddrIn = .{
         .family = 2,
         .port_be = std.mem.nativeToBig(u16, 53),
         .addr = readResolvNameserver(),
     };
-    if (sys.isErr(sys.sys3(sys.NR.connect, fd, @intFromPtr(&sa), @sizeOf(sys.SockAddrIn))) != null) {
+    if (sys.isErr(sys.sys3(sys.NR.connect, @intCast(fd), @intFromPtr(&sa), @sizeOf(sys.SockAddrIn))) != null or
+        sys.isErr(sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(&pkt), pkt_len)) != null)
+    {
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
         completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
         return;
     }
-    if (sys.isErr(sys.sys3(sys.NR.write, fd, @intFromPtr(&pkt), pkt_len)) != null) {
-        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
+
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
-    }
-    var pfd: sys.PollFd = .{ .fd = @intCast(fd), .events = sys.POLLIN, .revents = 0 };
-    var ts: sys.Timespec = .{ .sec = 2, .nsec = 0 };
-    const pres = sys.sys4(sys.NR.ppoll, @intFromPtr(&pfd), 1, @intFromPtr(&ts), 0);
-    if (sys.isErr(pres) != null or pres == 0) {
-        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
-        return;
-    }
-    var resp: [512]u8 = undefined;
-    const rlen_res = sys.sys3(sys.NR.read, fd, @intFromPtr(&resp), resp.len);
-    if (sys.isErr(rlen_res) != null or rlen_res < 12) {
-        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
-        return;
-    }
-    const r = resp[0..rlen_res];
-    const qdcount = std.mem.readInt(u16, r[4..6], .big);
-    const ancount = std.mem.readInt(u16, r[6..8], .big);
-    var pos: usize = 12;
-    for (0..qdcount) |_| {
-        pos = skipDnsName(r, pos) orelse {
-            completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
-            return;
-        };
-        if (pos + 4 > r.len) break;
-        pos += 4;
-    }
-    var families: [16]u8 = undefined;
-    var addr_bytes: [16 * 16]u8 = undefined;
-    var count: usize = 0;
-    var addr_off: usize = 0;
-    for (0..ancount) |_| {
-        pos = skipDnsName(r, pos) orelse break;
-        if (pos + 10 > r.len) break;
-        const rtype = std.mem.readInt(u16, r[pos..][0..2], .big);
-        const rdlen = std.mem.readInt(u16, r[pos + 8 ..][0..2], .big);
-        pos += 10;
-        if (pos + rdlen > r.len) break;
-        if (rtype == 1 and rdlen == 4 and count < families.len and addr_off + 4 <= addr_bytes.len) {
-            families[count] = 4;
-            @memcpy(addr_bytes[addr_off..][0..4], r[pos..][0..4]);
-            count += 1;
-            addr_off += 4;
-        } else if (rtype == 28 and rdlen == 16 and count < families.len and addr_off + 16 <= addr_bytes.len) {
-            families[count] = 6;
-            @memcpy(addr_bytes[addr_off..][0..16], r[pos..][0..16]);
-            count += 1;
-            addr_off += 16;
-        }
-        pos += rdlen;
-    }
-    if (count == 0) {
-        completeInline(ov, pal_abi.ERROR_NOENT, 0, 0);
-        return;
-    }
-    const total = writeNetLookupResult(out, cap, families[0..count], addr_bytes[0..addr_off]);
-    if (total == 0) {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    }
-    completeInline(ov, 0, 0, total);
+    };
+    op.kind = .dns_lookup;
+    op.guest_ov = ov;
+    op.fd = fd;
+    op.buf = out;
+    op.len = cap;
+    op.deadline_ns = monotonicNs() + 2_000_000_000;
 }
 fn openSystemCaBundle(s: *PalState, out_buf: []u8) ?[]const u8 {
     if (readSystemCaFile("/etc/ssl/certs/ca-certificates.crt", out_buf)) |data| return data;
@@ -2038,6 +2051,22 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                     const rem = op.deadline_ns - now;
                     if (min_wait_ns == null or rem < min_wait_ns.?) min_wait_ns = rem;
                 }
+            } else if (op.kind == .dns_lookup) {
+                if (op.deadline_ns <= now) {
+                    const gov = op.guest_ov.?;
+                    if (op.fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(op.fd));
+                    freeOp(s, op);
+                    completeInline(gov, pal_abi.ERROR_TIMEDOUT, 0, 0);
+                    fired = true;
+                } else {
+                    const rem = op.deadline_ns - now;
+                    if (min_wait_ns == null or rem < min_wait_ns.?) min_wait_ns = rem;
+                    if (pfd_count < pfds.len) {
+                        pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLIN, .revents = 0 };
+                        op_idx[pfd_count] = idx;
+                        pfd_count += 1;
+                    }
+                }
             } else if ((op.kind == .read_fd or op.kind == .accept or op.kind == .udp_read) and pfd_count < pfds.len) {
                 pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLIN, .revents = 0 };
                 op_idx[pfd_count] = idx;
@@ -2061,10 +2090,13 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                 }
             }
         }
-        if (fired) continue;
+        if (fired and pfd_count == 0) continue;
 
         var ts: sys.Timespec = undefined;
-        const ts_ptr: usize = if (min_wait_ns) |w| blk: {
+        const ts_ptr: usize = if (fired) blk: {
+            ts = .{ .sec = 0, .nsec = 0 };
+            break :blk @intFromPtr(&ts);
+        } else if (min_wait_ns) |w| blk: {
             ts = .{ .sec = @intCast(w / 1_000_000_000), .nsec = @intCast(w % 1_000_000_000) };
             break :blk @intFromPtr(&ts);
         } else 0;
@@ -2104,6 +2136,19 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                             _ = sys.sys1(sys.NR.close, @intCast(cli_fd));
                             completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
                         }
+                    }
+                } else if (op.kind == .dns_lookup) {
+                    var resp: [512]u8 = undefined;
+                    const rlen_res = sys.sys3(sys.NR.read, @intCast(op.fd), @intFromPtr(&resp), resp.len);
+                    _ = sys.sys1(sys.NR.close, @intCast(op.fd));
+                    const out_ptr = op.buf.?;
+                    const out_cap = op.len;
+                    freeOp(s, op);
+                    if (sys.isErr(rlen_res) != null) {
+                        completeInline(gov, pal_abi.ERROR_NOENT, 0, 0);
+                    } else {
+                        const parsed = parseDnsResponse(resp[0..rlen_res], out_ptr, out_cap);
+                        completeInline(gov, parsed.err, 0, parsed.total);
                     }
                 } else if (op.kind == .udp_read) {
                     var sa: sys.SockAddrIn = undefined;
@@ -2330,4 +2375,21 @@ test "linux PAL net_lookup encodes [totalSize][count][families][ips] wire format
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, out[4..8], .little));
     try std.testing.expectEqualSlices(u8, &fams, out[8..10]);
     try std.testing.expectEqualSlices(u8, &ips, out[10..18]);
+}
+
+test "linux PAL DNS response parser handles multi-record A responses" {
+    // Minimal DNS response: 1 question ("a.b"), 2 A answers (1.2.3.4, 5.6.7.8)
+    const pkt = [_]u8{
+        0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+        0x01, 'a',  0x01, 'b',  0x00, 0x00, 0x01, 0x00, 0x01,
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 1, 2, 3, 4,
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 5, 6, 7, 8,
+    };
+    var out: [64]u8 = @splat(0);
+    const parsed = parseDnsResponse(&pkt, &out, out.len);
+    try std.testing.expectEqual(@as(u32, 0), parsed.err);
+    try std.testing.expectEqual(@as(u32, 18), parsed.total);
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, out[4..8], .little));
+    try std.testing.expectEqualSlices(u8, &.{ 4, 4 }, out[8..10]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, out[10..18]);
 }
