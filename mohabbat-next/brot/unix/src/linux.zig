@@ -82,7 +82,10 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
     const me_path_z = argv[base_idx + 1];
     const pool_off = pool.parseU64(cstrSlice(argv[base_idx + 2])) orelse die("brot: bad pool_off\n", 13);
     const pool_len_u64 = pool.parseU64(cstrSlice(argv[base_idx + 3])) orelse die("brot: bad pool_len\n", 14);
-    const user_argv = argv[base_idx + 4 ..];
+    const tail_argv = argv[base_idx + 4 ..];
+    const user_argv = allocator.alloc([*:0]const u8, 1 + tail_argv.len) catch die("brot: alloc argv failed\n", 18);
+    user_argv[0] = me_path_z;
+    @memcpy(user_argv[1..], tail_argv);
 
     if (pool_len_u64 == 0 or pool_len_u64 > 128 * 1024 * 1024) die("brot: invalid pool_len\n", 15);
     const pool_len: usize = @intCast(pool_len_u64);

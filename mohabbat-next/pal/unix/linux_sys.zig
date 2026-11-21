@@ -41,6 +41,41 @@ pub const Timespec = extern struct {
     nsec: i64,
 };
 
+pub const Winsize = extern struct {
+    ws_row: u16 = 0,
+    ws_col: u16 = 0,
+    ws_xpixel: u16 = 0,
+    ws_ypixel: u16 = 0,
+};
+
+pub const Termios = extern struct {
+    c_iflag: u32 = 0,
+    c_oflag: u32 = 0,
+    c_cflag: u32 = 0,
+    c_lflag: u32 = 0,
+    c_line: u8 = 0,
+    c_cc: [32]u8 = @splat(0),
+    c_ispeed: u32 = 0,
+    c_ospeed: u32 = 0,
+};
+
+pub const SignalfdSiginfo = extern struct {
+    ssi_signo: u32 = 0,
+    _pad: [124]u8 = @splat(0),
+};
+
+pub const TCGETS: usize = 0x5401;
+pub const TCSETS: usize = 0x5402;
+pub const TIOCSCTTY: usize = 0x540e;
+pub const TIOCGWINSZ: usize = 0x5413;
+pub const TIOCSWINSZ: usize = 0x5414;
+pub const TIOCGPTN: usize = 0x80045430;
+pub const TIOCSPTLCK: usize = 0x40045431;
+
+pub const SIG_BLOCK: usize = 0;
+pub const SFD_NONBLOCK: u32 = 0o4000;
+pub const SFD_CLOEXEC: u32 = 0o2000000;
+
 pub const SockAddrIn = extern struct {
     family: u16 = 2,
     port_be: u16 = 0,
@@ -114,6 +149,7 @@ pub fn mapLinuxErrno(errno: u32) u32 {
         20 => pal_abi.ERROR_NOTDIR,
         21 => pal_abi.ERROR_ISDIR,
         22 => pal_abi.ERROR_INVALID,
+        25 => pal_abi.ERROR_NOTTY,
         29 => pal_abi.ERROR_SPIPE,
         32 => pal_abi.ERROR_PIPE,
         38 => pal_abi.ERROR_UNSUPPORTED,
@@ -272,6 +308,9 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const ftruncate = 77;
         pub const getcwd = 79;
         pub const chdir = 80;
+        pub const ioctl = 16;
+        pub const rt_sigprocmask = 14;
+        pub const setsid = 112;
         pub const getdents64 = 217;
         pub const clock_gettime = 228;
         pub const exit_group = 231;
@@ -286,6 +325,7 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const fchmodat = 268;
         pub const ppoll = 271;
         pub const utimensat = 280;
+        pub const signalfd4 = 289;
         pub const getrandom = 318;
     },
     .aarch64 => struct {
@@ -293,6 +333,7 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const getcwd = 17;
         pub const dup3 = 24;
         pub const fcntl = 25;
+        pub const ioctl = 29;
         pub const mkdirat = 34;
         pub const unlinkat = 35;
         pub const symlinkat = 36;
@@ -311,6 +352,7 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const pread64 = 67;
         pub const pwrite64 = 66;
         pub const ppoll = 73;
+        pub const signalfd4 = 74;
         pub const readlinkat = 78;
         pub const newfstatat = 79;
         pub const fstat = 80;
@@ -318,6 +360,8 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const exit_group = 94;
         pub const clock_gettime = 113;
         pub const kill = 129;
+        pub const rt_sigprocmask = 135;
+        pub const setsid = 157;
         pub const socket = 198;
         pub const bind = 200;
         pub const listen = 201;
