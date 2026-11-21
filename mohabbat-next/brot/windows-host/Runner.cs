@@ -161,8 +161,15 @@ internal static class Runner
 
             PlatformEntry entry =
                 Marshal.GetDelegateForFunctionPointer<PlatformEntry>(platformCode);
-            PrecommitStack();
-            return entry();
+            int status = 0;
+            var worker = new System.Threading.Thread(() =>
+            {
+                PrecommitStack();
+                status = entry();
+            }, 16 * 1024 * 1024);
+            worker.Start();
+            worker.Join();
+            return status;
         }
         catch (InvalidOperationException exception)
         {

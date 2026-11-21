@@ -7,6 +7,7 @@ const env_time = @import("env_time.zig");
 const fs_ops = @import("fs_ops.zig");
 const net_ops = @import("net_ops.zig");
 const proc_tty = @import("proc_tty.zig");
+const worker_pool = @import("worker_pool.zig");
 
 const PalState = mem.PalState;
 
@@ -156,6 +157,11 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(win.win_cc) void {
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
             @atomicStore(bool, &op.canceled, true, .release);
+            if (op.kind == .worker_op) {
+                const gov = op.guest_ov.?;
+                mem.completeInline(gov, pal_abi.ERROR_CANCELED, 0, 0);
+                return;
+            }
             if (op.kind == .timer or op.kind == .signal_wait or op.kind == .system_info_wait) {
                 const gov = op.guest_ov.?;
                 mem.freeOp(s, op);
@@ -217,6 +223,53 @@ fn stdHandleWriteWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
     const h = if (op.handle_token == 1) s.stdout_h else s.stderr_h;
     var n: u32 = 0;
     if (wf(h, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), &n, null) == 0) {
+        const err = if (s.p_get_last_error) |gle| gle() else 5;
+        op.win_error = win.mapWinError(err);
+    } else {
+        op.win_error = 0;
+    }
+    _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
+    return 0;
+}
+
+fn ptyReadWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s = statePtr();
+    const pq = s.p_post_queued orelse return 0;
+    const rf = s.p_read_file orelse {
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const pty_h: win.HANDLE = @ptrFromInt(op.sock_fd);
+    var n: u32 = 0;
+    if (rf(pty_h, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), &n, null) == 0) {
+        const err = if (s.p_get_last_error) |gle| gle() else 5;
+        if (err == 109 or err == 232) {
+            op.win_error = 0;
+            n = 0;
+        } else {
+            op.win_error = win.mapWinError(err);
+        }
+    } else {
+        op.win_error = 0;
+    }
+    _ = pq(s.iocp, n, @intFromPtr(op), &op.win_ov);
+    return 0;
+}
+
+fn ptyWriteWorker(ctx: ?*anyopaque) callconv(win.win_cc) u32 {
+    const op: *mem.PendingOp = @ptrCast(@alignCast(ctx.?));
+    const s = statePtr();
+    const pq = s.p_post_queued orelse return 0;
+    const wf = s.p_write_file orelse {
+        op.win_error = pal_abi.ERROR_UNSUPPORTED;
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+        return 0;
+    };
+    const pty_h: win.HANDLE = @ptrFromInt(op.sock_fd);
+    var n: u32 = 0;
+    if (wf(pty_h, op.buf, @intCast(@min(op.len, 0x7fff_ffff)), &n, null) == 0) {
         const err = if (s.p_get_last_error) |gle| gle() else 5;
         op.win_error = win.mapWinError(err);
     } else {
@@ -343,15 +396,29 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
             mem.completeInline(ov, 0, 0, 0);
             return;
         }
+        if (s.p_create_thread) |ct| {
+            const op = mem.allocOp(s) orelse {
+                mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                return;
+            };
+            op.kind = .read;
+            op.guest_ov = ov;
+            op.handle_token = handle;
+            op.sock_fd = @intFromPtr(he.pty_read);
+            op.buf = buf;
+            op.len = len;
+            const th = ct(null, 0, ptyReadWorker, op, 0, null);
+            if (th != null) {
+                op.worker_handle = th;
+                return;
+            }
+            mem.freeOp(s, op);
+        }
         if (mem.resolveKernel32(s, "PeekNamedPipe")) |p_peek| {
             const PeekFn = *const fn (win.HANDLE, ?[*]u8, u32, ?*u32, ?*u32, ?*u32) callconv(win.win_cc) i32;
             const peek: PeekFn = @ptrCast(@alignCast(p_peek));
             var available: u32 = 0;
-            if (peek(he.pty_read, null, 0, null, &available, null) == 0) {
-                mem.completeInline(ov, 0, 0, 0);
-                return;
-            }
-            if (available == 0) {
+            if (peek(he.pty_read, null, 0, null, &available, null) == 0 or available == 0) {
                 mem.completeInline(ov, 0, 0, 0);
                 return;
             }
@@ -463,6 +530,24 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
                     mem.completeInline(ov, 0, 0, 0);
                     return;
                 }
+                if (s.p_create_thread) |ct| {
+                    const op = mem.allocOp(s) orelse {
+                        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                        return;
+                    };
+                    op.kind = .write;
+                    op.guest_ov = ov;
+                    op.handle_token = handle;
+                    op.sock_fd = @intFromPtr(he.pty_write);
+                    op.buf = @ptrCast(@constCast(buf));
+                    op.len = len;
+                    const th = ct(null, 0, ptyWriteWorker, op, 0, null);
+                    if (th != null) {
+                        op.worker_handle = th;
+                        return;
+                    }
+                    mem.freeOp(s, op);
+                }
                 const wf = s.p_write_file orelse {
                     mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
                     return;
@@ -481,6 +566,19 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
     if (handle == 1 or handle == 2) {
         if (len == 0) {
             mem.completeInline(ov, 0, 0, 0);
+            return;
+        }
+        const h = if (handle == 1) s.stdout_h else s.stderr_h;
+        const is_char = if (s.p_get_file_type) |gft| gft(h) == 2 else false;
+        if ((is_char or len <= 4096) and s.p_write_file != null) {
+            const wf = s.p_write_file.?;
+            var n: u32 = 0;
+            if (wf(h, buf, @intCast(@min(len, 0x7fff_ffff)), &n, null) == 0) {
+                const err = if (s.p_get_last_error) |gle| gle() else 5;
+                mem.completeInline(ov, win.mapWinError(err), 0, 0);
+            } else {
+                mem.completeInline(ov, 0, 0, n);
+            }
             return;
         }
         const op = mem.allocOp(s) orelse {
@@ -605,12 +703,79 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
     }
 }
 
+fn executeWinWorkItem(ctx: *anyopaque, op_idx: u16) void {
+    const s: *PalState = @ptrCast(@alignCast(ctx));
+    const op = &s.ops[op_idx];
+    op.res_ov = .{};
+    switch (op.work_kind) {
+        .path_open => @call(.never_inline, fs_ops.pathOpen, .{ s, &op.res_ov, op.buf.?, op.len, op.flags }),
+        .dir_read => @call(.never_inline, fs_ops.dirRead, .{ s, &op.res_ov, op.handle_token, op.buf.?, op.len }),
+        .path_stat => @call(.never_inline, fs_ops.pathStat, .{ s, &op.res_ov, op.buf2.?, op.len2, op.flags, op.buf.?, op.len }),
+        .path_link => @call(.never_inline, fs_ops.pathLink, .{ s, &op.res_ov, op.buf.?, op.len, op.buf2.?, op.len2, op.flags }),
+        .path_symlink => @call(.never_inline, fs_ops.pathSymlink, .{ s, &op.res_ov, op.buf.?, op.len, op.buf2.?, op.len2, op.flags }),
+        .path_readlink => @call(.never_inline, fs_ops.pathReadlink, .{ s, &op.res_ov, op.buf2.?, op.len2, op.buf.?, op.len }),
+        .path_chmod => @call(.never_inline, fs_ops.pathChmod, .{ s, &op.res_ov, op.buf.?, op.len, op.flags }),
+        .path_set_times => @call(.never_inline, fs_ops.pathSetTimes, .{ s, &op.res_ov, op.buf.?, op.len, op.arg_i64_a, op.arg_u32_a, op.arg_i64_b, op.arg_u32_b, op.flags }),
+        .path_remove => @call(.never_inline, fs_ops.pathRemove, .{ s, &op.res_ov, op.buf.?, op.len, op.flags }),
+        .path_mkdir => @call(.never_inline, fs_ops.pathMkdir, .{ s, &op.res_ov, op.buf.?, op.len, op.flags }),
+        .path_rename => @call(.never_inline, fs_ops.pathRename, .{ s, &op.res_ov, op.buf.?, op.len, op.buf2.?, op.len2 }),
+        .handle_truncate => @call(.never_inline, fs_ops.handleTruncate, .{ s, &op.res_ov, op.handle_token, op.arg_i64_a }),
+        .seek => @call(.never_inline, fs_ops.seek, .{ s, &op.res_ov, op.handle_token, op.arg_i64_a, op.flags }),
+        .net_cert_verify => @call(.never_inline, net_ops.netCertVerify, .{ s, &op.res_ov, op.buf.?, op.len, op.buf2.?, op.len2 }),
+        .none => {},
+    }
+}
+
+fn postWinWorkDone(ctx: *anyopaque, op_idx: u16) void {
+    const s: *PalState = @ptrCast(@alignCast(ctx));
+    const op = &s.ops[op_idx];
+    if (s.p_post_queued) |pq| {
+        _ = pq(s.iocp, 0, @intFromPtr(op), &op.win_ov);
+    }
+}
+
+fn winOpIndex(s: *PalState, op: *mem.PendingOp) u16 {
+    return @intCast((@intFromPtr(op) - @intFromPtr(&s.ops[0])) / @sizeOf(mem.PendingOp));
+}
+
+fn submitWinWork(s: *PalState, op: *mem.PendingOp) void {
+    if (s.pool_ptr) |pool| {
+        if (pool.submit(winOpIndex(s, op))) return;
+    }
+    executeWinWorkItem(s, winOpIndex(s, op));
+    const gov = op.guest_ov.?;
+    const res_ov = op.res_ov;
+    mem.freeOp(s, op);
+    mem.completeInline(gov, res_ov.@"error", res_ov.continued, res_ov.result_ext);
+}
+
 fn abiSeek(ov: *pal_abi.Overlapped, handle: u64, off: i64, whence: u32) callconv(win.win_cc) void {
-    fs_ops.seek(statePtr(), ov, handle, off, whence);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .seek;
+    op.guest_ov = ov;
+    op.handle_token = handle;
+    op.arg_i64_a = off;
+    op.flags = whence;
+    submitWinWork(s, op);
 }
 
 fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(win.win_cc) void {
-    fs_ops.handleTruncate(statePtr(), ov, handle, size);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .handle_truncate;
+    op.guest_ov = ov;
+    op.handle_token = handle;
+    op.arg_i64_a = size;
+    submitWinWork(s, op);
 }
 
 fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
@@ -631,7 +796,7 @@ fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
             }
         }
         if (he.dir_path_w) |p| {
-            if (s.host.free) |free| free(@ptrCast(@constCast(p)));
+            mem.freeWideAlloc(s, @ptrCast(@constCast(p)));
         }
     } else if (he.is_socket) {
         if (mem.resolveDll(s, &s.ws2_32, "ws2_32.dll", "closesocket")) |p_cs| {
@@ -646,47 +811,180 @@ fn abiHandleClose(handle: u64) callconv(win.win_cc) void {
 }
 
 fn abiPathOpen(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(win.win_cc) void {
-    fs_ops.pathOpen(statePtr(), ov, path, len, flags);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_open;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = flags;
+    submitWinWork(s, op);
 }
 
 fn abiDirRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(win.win_cc) void {
-    fs_ops.dirRead(statePtr(), ov, handle, buf, len);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .dir_read;
+    op.guest_ov = ov;
+    op.handle_token = handle;
+    op.buf = buf;
+    op.len = len;
+    submitWinWork(s, op);
 }
 
 fn abiPathStat(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32, out: [*]u8, cap: usize) callconv(win.win_cc) void {
-    fs_ops.pathStat(statePtr(), ov, path, len, flags, out, cap);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_stat;
+    op.guest_ov = ov;
+    op.buf2 = path;
+    op.len2 = len;
+    op.buf = out;
+    op.len = cap;
+    op.flags = flags;
+    submitWinWork(s, op);
 }
 
 fn abiPathLink(ov: *pal_abi.Overlapped, src: [*]const u8, s_len: usize, dst: [*]const u8, d_len: usize, flags: u32) callconv(win.win_cc) void {
-    fs_ops.pathLink(statePtr(), ov, src, s_len, dst, d_len, flags);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_link;
+    op.guest_ov = ov;
+    op.buf = @constCast(src);
+    op.len = s_len;
+    op.buf2 = dst;
+    op.len2 = d_len;
+    op.flags = flags;
+    submitWinWork(s, op);
 }
 
 fn abiPathSymlink(ov: *pal_abi.Overlapped, target: [*]const u8, t_len: usize, link: [*]const u8, l_len: usize, kind: u32) callconv(win.win_cc) void {
-    fs_ops.pathSymlink(statePtr(), ov, target, t_len, link, l_len, kind);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_symlink;
+    op.guest_ov = ov;
+    op.buf = @constCast(target);
+    op.len = t_len;
+    op.buf2 = link;
+    op.len2 = l_len;
+    op.flags = kind;
+    submitWinWork(s, op);
 }
 
 fn abiPathReadlink(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, out: [*]u8, cap: usize) callconv(win.win_cc) void {
-    fs_ops.pathReadlink(statePtr(), ov, path, len, out, cap);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_readlink;
+    op.guest_ov = ov;
+    op.buf2 = path;
+    op.len2 = len;
+    op.buf = out;
+    op.len = cap;
+    submitWinWork(s, op);
 }
 
 fn abiPathChmod(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(win.win_cc) void {
-    fs_ops.pathChmod(statePtr(), ov, path, len, mode);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_chmod;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = mode;
+    submitWinWork(s, op);
 }
 
 fn abiPathSetTimes(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, at_sec: i64, at_nsec: u32, mt_sec: i64, mt_nsec: u32, flags: u32) callconv(win.win_cc) void {
-    fs_ops.pathSetTimes(statePtr(), ov, path, len, at_sec, at_nsec, mt_sec, mt_nsec, flags);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_set_times;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.arg_i64_a = at_sec;
+    op.arg_u32_a = at_nsec;
+    op.arg_i64_b = mt_sec;
+    op.arg_u32_b = mt_nsec;
+    op.flags = flags;
+    submitWinWork(s, op);
 }
 
 fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(win.win_cc) void {
-    fs_ops.pathRemove(statePtr(), ov, path, len, flags);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_remove;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = flags;
+    submitWinWork(s, op);
 }
 
 fn abiPathMkdir(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(win.win_cc) void {
-    fs_ops.pathMkdir(statePtr(), ov, path, len, mode);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_mkdir;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = mode;
+    submitWinWork(s, op);
 }
 
 fn abiPathRename(ov: *pal_abi.Overlapped, old_p: [*]const u8, o_len: usize, new_p: [*]const u8, n_len: usize) callconv(win.win_cc) void {
-    fs_ops.pathRename(statePtr(), ov, old_p, o_len, new_p, n_len);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_rename;
+    op.guest_ov = ov;
+    op.buf = @constCast(old_p);
+    op.len = o_len;
+    op.buf2 = new_p;
+    op.len2 = n_len;
+    submitWinWork(s, op);
 }
 
 fn abiNetOpen(ov: *pal_abi.Overlapped, addr: [*]const u8, len: usize, port: u32, flags: u32) callconv(win.win_cc) void {
@@ -702,7 +1000,19 @@ fn abiNetLookup(ov: *pal_abi.Overlapped, name: [*]const u8, len: usize, out: [*]
 }
 
 fn abiNetCertVerify(ov: *pal_abi.Overlapped, name: [*]const u8, n_len: usize, chain: [*]const u8, c_len: usize) callconv(win.win_cc) void {
-    net_ops.netCertVerify(statePtr(), ov, name, n_len, chain, c_len);
+    const s = statePtr();
+    const op = mem.allocOp(s) orelse {
+        mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .net_cert_verify;
+    op.guest_ov = ov;
+    op.buf = @constCast(name);
+    op.len = n_len;
+    op.buf2 = chain;
+    op.len2 = c_len;
+    submitWinWork(s, op);
 }
 
 fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg: [*]const u8, len: usize) callconv(win.win_cc) void {
@@ -888,13 +1198,47 @@ fn initKernel32(s: *PalState) bool {
     s.p_post_queued = @ptrCast(@alignCast(mem.resolveKernel32(s, "PostQueuedCompletionStatus") orelse return false));
     s.p_create_thread = @ptrCast(@alignCast(mem.resolveKernel32(s, "CreateThread") orelse return false));
     s.p_get_file_type = @ptrCast(@alignCast(mem.resolveKernel32(s, "GetFileType") orelse return false));
+    s.p_acquire_srw = @ptrCast(@alignCast(mem.resolveKernel32(s, "AcquireSRWLockExclusive")));
+    s.p_release_srw = @ptrCast(@alignCast(mem.resolveKernel32(s, "ReleaseSRWLockExclusive")));
+    s.p_get_proc_address = @ptrCast(@alignCast(mem.resolveKernel32(s, "GetProcAddress")));
+    s.p_load_library_a = @ptrCast(@alignCast(mem.resolveKernel32(s, "LoadLibraryA")));
 
     const gsh = s.p_get_std_handle.?;
     s.stdin_h = gsh(@bitCast(@as(i32, -10)));
     s.stdout_h = gsh(@bitCast(@as(i32, -11)));
     s.stderr_h = gsh(@bitCast(@as(i32, -12)));
     s.iocp = s.p_create_iocp.?(win.INVALID_HANDLE_VALUE, null, 0, 1);
-    return s.iocp != null;
+    if (s.iocp == null) return false;
+
+    if (s.p_acquire_srw != null and s.p_release_srw != null) {
+        const p_csem = mem.resolveKernel32(s, "CreateSemaphoreW");
+        const p_rsem = mem.resolveKernel32(s, "ReleaseSemaphore");
+        if (p_csem != null and p_rsem != null) {
+            const CreateSemFn = *const fn (?*anyopaque, i32, i32, ?[*:0]const u16) callconv(win.win_cc) win.HANDLE;
+            const csem: CreateSemFn = @ptrCast(@alignCast(p_csem.?));
+            const sem = csem(null, 0, worker_pool.QUEUE_CAP, null);
+            if (sem != null) {
+                const va = s.p_virtual_alloc.?;
+                if (va(null, pageAlign(@sizeOf(worker_pool.WinWorkerPool)), 0x3000, 0x04)) |pmem| {
+                    const pool: *worker_pool.WinWorkerPool = @ptrCast(@alignCast(pmem));
+                    pool.* = .{};
+                    pool.semaphore = sem;
+                    pool.ctx = s;
+                    pool.exec_fn = executeWinWorkItem;
+                    pool.post_fn = postWinWorkDone;
+                    pool.p_acquire_srw = s.p_acquire_srw;
+                    pool.p_release_srw = s.p_release_srw;
+                    pool.p_release_sem = @ptrCast(@alignCast(p_rsem.?));
+                    pool.p_wait_single = s.p_wait_single;
+                    pool.p_create_thread = s.p_create_thread;
+                    pool.p_close_handle = s.p_close_handle;
+                    pool.p_get_tick_count64 = s.p_get_tick_count64;
+                    s.pool_ptr = pool;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
@@ -979,6 +1323,8 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
 
                 const canceled = @atomicLoad(bool, &op.canceled, .acquire);
                 const kind = op.kind;
+                const wkind = op.work_kind;
+                const res_ov = op.res_ov;
                 const guest_ov = op.guest_ov;
                 const raw_sock = op.win_ov.internal_high;
                 const worker_handle = op.worker_handle;
@@ -1006,9 +1352,17 @@ pub fn windowsPlatformMain() callconv(win.win_cc) i32 {
                     if (s.p_close_handle) |ch| _ = ch(worker_handle);
                 }
 
-                if (canceled or guest_ov == null or kind == .pipe_connect) continue;
+                if (canceled) {
+                    if (kind == .worker_op and wkind == .path_open and res_ov.@"error" == 0 and res_ov.result_ext >= 3) {
+                        abiHandleClose(res_ov.result_ext);
+                    }
+                    continue;
+                }
+                if (guest_ov == null or kind == .pipe_connect) continue;
                 const gov = guest_ov.?;
-                if (kind == .accept) {
+                if (kind == .worker_op) {
+                    mem.completeInline(gov, res_ov.@"error", res_ov.continued, res_ov.result_ext);
+                } else if (kind == .accept) {
                     if (completion_error != 0) {
                         mem.completeInline(gov, completion_error, 0, 0);
                     } else if (mem.allocHandle(s)) |cli_he| {

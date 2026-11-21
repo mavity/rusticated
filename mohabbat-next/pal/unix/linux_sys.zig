@@ -92,16 +92,19 @@ pub const CLONE_FILES: usize = 0x00000400;
 pub const CLONE_SIGHAND: usize = 0x00000800;
 pub const CLONE_THREAD: usize = 0x00010000;
 pub const CLONE_SYSVSEM: usize = 0x00040000;
+pub const CLONE_PARENT_SETTID: usize = 0x00100000;
+pub const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 
-pub fn cloneThread(stack_top: usize, entry_fn: *const fn (usize) callconv(.c) void, arg: usize) isize {
-    const flags: usize = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+pub fn cloneThread(stack_top: usize, entry_fn: *const fn (usize) callconv(.c) void, arg: usize, tid_ptr: *i32) isize {
+    const flags: usize = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
+    const tid_addr = @intFromPtr(tid_ptr);
     return switch (builtin.cpu.arch) {
         .x86_64 => asm volatile (
             \\movq %[fn_ptr], -8(%[stk])
             \\movq %[arg_val], -16(%[stk])
             \\leaq -16(%[stk]), %%rsi
-            \\xorq %%rdx, %%rdx
-            \\xorq %%r10, %%r10
+            \\movq %[tid], %%rdx
+            \\movq %[tid], %%r10
             \\xorq %%r8, %%r8
             \\movq $56, %%rax
             \\syscall
@@ -121,15 +124,16 @@ pub fn cloneThread(stack_top: usize, entry_fn: *const fn (usize) callconv(.c) vo
               [stk] "r" (stack_top),
               [fn_ptr] "r" (@intFromPtr(entry_fn)),
               [arg_val] "r" (arg),
+              [tid] "r" (tid_addr),
             : .{ .rcx = true, .rsi = true, .rdx = true, .r8 = true, .r10 = true, .r11 = true, .memory = true }
         ),
         .aarch64 => asm volatile (
             \\stp %[fn_ptr], %[arg_val], [%[stk], #-16]!
             \\mov x0, %[flags]
             \\mov x1, %[stk]
-            \\mov x2, #0
+            \\mov x2, %[tid]
             \\mov x3, #0
-            \\mov x4, #0
+            \\mov x4, %[tid]
             \\mov x8, #220
             \\svc #0
             \\cbnz x0, 1f
@@ -144,6 +148,7 @@ pub fn cloneThread(stack_top: usize, entry_fn: *const fn (usize) callconv(.c) vo
               [stk] "r" (stack_top),
               [fn_ptr] "r" (@intFromPtr(entry_fn)),
               [arg_val] "r" (arg),
+              [tid] "r" (tid_addr),
             : .{ .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x8 = true, .memory = true }
         ),
         else => @compileError("Unsupported arch"),

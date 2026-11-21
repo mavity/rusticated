@@ -28,6 +28,7 @@ const HandleEntry = struct {
     is_udp: bool = false,
     is_process: bool = false,
     is_pty: bool = false,
+    is_pipe: bool = false,
     pty_read_fd: i32 = -1,
     pty_write_fd: i32 = -1,
 };
@@ -62,6 +63,9 @@ const WorkOpKind = enum(u8) {
     path_rename = 11,
     handle_truncate = 12,
     net_cert_verify = 13,
+    file_read = 14,
+    file_write = 15,
+    file_seek = 16,
 };
 
 const PendingOp = struct {
@@ -106,6 +110,8 @@ const PalState = struct {
     system_info_hash: u64 = 0,
     has_system_info_hash: bool = false,
     system_info_version: u32 = 1,
+    resolv_ns: [4]u8 = .{ 1, 1, 1, 1 },
+    has_resolv_ns: bool = false,
 };
 
 var test_state: ?*PalState = null;
@@ -612,18 +618,36 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         return;
     }
     const positional = (ov.flags & pal_abi.READ_FLAG_POSITIONAL) != 0;
-    const res = if (positional) blk: {
-        const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
-        const off = trailing.*;
-        if (off < 0) {
-            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-            return;
+    const is_stream = he.is_socket or he.is_pipe;
+    if (!is_stream) {
+        var off: i64 = 0;
+        if (positional) {
+            const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
+            off = trailing.*;
+            if (off < 0) {
+                completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+                return;
+            }
         }
-        break :blk sys.sys4(sys.NR.pread64, @intCast(he.fd), @intFromPtr(buf), len, @bitCast(off));
-    } else sys.sys3(sys.NR.read, @intCast(he.fd), @intFromPtr(buf), len);
+        const op = allocOp(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .worker_op;
+        op.work_kind = .file_read;
+        op.guest_ov = ov;
+        op.fd = he.fd;
+        op.buf = buf;
+        op.len = len;
+        op.flags = @intFromBool(positional);
+        op.arg_i64_a = off;
+        submitOrRunInline(s, op);
+        return;
+    }
 
+    const res = sys.sys3(sys.NR.read, @intCast(he.fd), @intFromPtr(buf), len);
     if (sys.isErr(res)) |e| {
-        if (e == 11 and !positional) {
+        if (e == 11) {
             const op = allocOp(s) orelse {
                 completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
                 return;
@@ -690,29 +714,48 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
             }
         }
     }
+    var is_stream = (handle == 1 or handle == 2);
     const fd: i32 = if (handle == 1) 1 else if (handle == 2) 2 else blk: {
         const he = findHandle(s, handle) orelse {
             completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
             return;
         };
+        is_stream = he.is_socket or he.is_pipe;
         break :blk he.fd;
     };
     const positional = (ov.flags & pal_abi.WRITE_FLAG_POSITIONAL) != 0;
-    const res = if (positional) blk: {
-        if (len == 0) {
+    if (!is_stream) {
+        if (positional and len == 0) {
             completeInline(ov, 0, 0, 0);
             return;
         }
-        const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
-        const off = trailing.*;
-        if (off < 0) {
-            completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-            return;
+        var off: i64 = 0;
+        if (positional) {
+            const trailing: *const i64 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(ov)) + @sizeOf(pal_abi.Overlapped)));
+            off = trailing.*;
+            if (off < 0) {
+                completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+                return;
+            }
         }
-        break :blk sys.sys4(sys.NR.pwrite64, @intCast(fd), @intFromPtr(buf), len, @bitCast(off));
-    } else sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(buf), len);
+        const op = allocOp(s) orelse {
+            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        op.kind = .worker_op;
+        op.work_kind = .file_write;
+        op.guest_ov = ov;
+        op.fd = fd;
+        op.buf = @constCast(buf);
+        op.len = len;
+        op.flags = @intFromBool(positional);
+        op.arg_i64_a = off;
+        submitOrRunInline(s, op);
+        return;
+    }
+    const res = sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(buf), len);
     if (sys.isErr(res)) |e| {
-        if (e == 11 and !positional) {
+        if (e == 11) {
             const op = allocOp(s) orelse {
                 completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
                 return;
@@ -740,12 +783,17 @@ fn abiSeek(ov: *pal_abi.Overlapped, handle: u64, off: i64, whence: u32) callconv
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     }
-    const res = sys.sys3(sys.NR.lseek, @intCast(he.fd), @bitCast(off), whence);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
-    }
-    completeInline(ov, 0, 0, res);
+    };
+    op.kind = .worker_op;
+    op.work_kind = .file_seek;
+    op.guest_ov = ov;
+    op.fd = he.fd;
+    op.arg_i64_a = off;
+    op.flags = whence;
+    submitOrRunInline(s, op);
 }
 
 fn execPathOpen(op: *PendingOp) void {
@@ -965,6 +1013,39 @@ fn executeWorkItem(ctx: *anyopaque, op_idx: u16) void {
         },
         .net_cert_verify => {
             op.res_err = verifyCertChainBytes(s, op.buf.?[0..op.len], op.buf2.?[0..op.len2]);
+        },
+        .file_read => {
+            const res = if (op.flags != 0)
+                sys.sys4(sys.NR.pread64, @intCast(op.fd), @intFromPtr(op.buf.?), op.len, @bitCast(op.arg_i64_a))
+            else
+                sys.sys3(sys.NR.read, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);
+            if (sys.isErr(res)) |e| {
+                op.res_err = sys.mapLinuxErrno(e);
+            } else {
+                op.res_err = 0;
+                op.res_ext = res;
+            }
+        },
+        .file_write => {
+            const res = if (op.flags != 0)
+                sys.sys4(sys.NR.pwrite64, @intCast(op.fd), @intFromPtr(op.buf.?), op.len, @bitCast(op.arg_i64_a))
+            else
+                sys.sys3(sys.NR.write, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);
+            if (sys.isErr(res)) |e| {
+                op.res_err = sys.mapLinuxErrno(e);
+            } else {
+                op.res_err = 0;
+                op.res_ext = res;
+            }
+        },
+        .file_seek => {
+            const res = sys.sys3(sys.NR.lseek, @intCast(op.fd), @bitCast(op.arg_i64_a), op.flags);
+            if (sys.isErr(res)) |e| {
+                op.res_err = sys.mapLinuxErrno(e);
+            } else {
+                op.res_err = 0;
+                op.res_ext = res;
+            }
         },
         .none => {},
     }
@@ -1491,20 +1572,23 @@ fn fmtZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
 }
 
 fn readResolvNameserver() [4]u8 {
-    var buf: [2048]u8 = undefined;
-    if (readSmallFile("/etc/resolv.conf", &buf)) |text| {
-        if (parseNameserverFromText(text)) |ip| return ip;
-    }
     const s = statePtr();
-    if (envLookup(s, "PREFIX")) |prefix| {
+    if (s.has_resolv_ns) return s.resolv_ns;
+    var buf: [2048]u8 = undefined;
+    var found: [4]u8 = .{ 1, 1, 1, 1 };
+    if (readSmallFile("/etc/resolv.conf", &buf)) |text| {
+        if (parseNameserverFromText(text)) |ip| found = ip;
+    } else if (envLookup(s, "PREFIX")) |prefix| {
         var path_buf: [512]u8 = undefined;
         if (fmtZ(&path_buf, "{s}/etc/resolv.conf", .{prefix})) |pz| {
             if (readSmallFile(pz, &buf)) |text| {
-                if (parseNameserverFromText(text)) |ip| return ip;
+                if (parseNameserverFromText(text)) |ip| found = ip;
             }
         }
     }
-    return .{ 1, 1, 1, 1 };
+    s.resolv_ns = found;
+    s.has_resolv_ns = true;
+    return found;
 }
 
 fn writeNetLookupResult(out: [*]u8, cap: usize, families: []const u8, addrs_data: []const u8) u32 {
@@ -1667,6 +1751,21 @@ fn readSystemCaFile(path_z: [*:0]const u8, out_buf: []u8) ?[]const u8 {
     return if (total > 0) out_buf[0..total] else null;
 }
 
+fn isPlausibleDerSequence(der: []const u8) bool {
+    if (der.len < 4 or der[0] != 0x30) return false;
+    const b1 = der[1];
+    if (b1 < 0x80) {
+        return 2 + @as(usize, b1) == der.len;
+    }
+    const len_bytes = b1 & 0x7f;
+    if (len_bytes == 0 or len_bytes > 4 or 2 + len_bytes > der.len) return false;
+    var body_len: usize = 0;
+    for (0..len_bytes) |i| {
+        body_len = (body_len << 8) | der[2 + i];
+    }
+    return 2 + len_bytes + body_len == der.len;
+}
+
 fn verifyCertChainBytes(s: *PalState, name: []const u8, payload: []const u8) u32 {
     if (name.len == 0 or name.len > 255 or payload.len < 4) return pal_abi.ERROR_INVALID;
     const count = std.mem.readInt(u32, payload[0..4], .little);
@@ -1680,6 +1779,7 @@ fn verifyCertChainBytes(s: *PalState, name: []const u8, payload: []const u8) u32
         const cert_len = std.mem.readInt(u32, payload[len_off..][0..4], .little);
         if (cert_len == 0 or off + cert_len > payload.len) return pal_abi.ERROR_INVALID;
         const der = payload[off..][0..cert_len];
+        if (!isPlausibleDerSequence(der)) return pal_abi.ERROR_INVALID;
         const cert = std.crypto.Certificate{ .buffer = der, .index = 0 };
         const parsed = cert.parse() catch return pal_abi.ERROR_INVALID;
         if (cert_count < parsed_buf.len) {
@@ -2051,18 +2151,21 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
             return;
         };
         in_he.fd = in_fds[1];
+        in_he.is_pipe = true;
         setNonBlock(in_fds[1]);
         const out_he = allocHandle(s) orelse {
             completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
         };
         out_he.fd = out_fds[0];
+        out_he.is_pipe = true;
         setNonBlock(out_fds[0]);
         const err_he = allocHandle(s) orelse {
             completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
         };
         err_he.fd = err_fds[0];
+        err_he.is_pipe = true;
         setNonBlock(err_fds[0]);
         pso.in_handle = in_he.token;
         pso.out_handle = out_he.token;
@@ -2104,7 +2207,9 @@ fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
         return;
     };
     r_he.fd = fds[0];
+    r_he.is_pipe = true;
     w_he.fd = fds[1];
+    w_he.is_pipe = true;
     completeInline(ov, 0, 0, (w_he.token << 32) | (r_he.token & 0xffff_ffff));
 }
 

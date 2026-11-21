@@ -1,9 +1,10 @@
 const std = @import("std");
 const pal_abi = @import("pal_abi");
 const win = @import("win_ffi.zig");
+const worker_pool = @import("worker_pool.zig");
 
 pub const MAX_HANDLES = 64;
-pub const MAX_OPS = 128;
+pub const MAX_OPS = 80;
 
 pub const HandleEntry = struct {
     used: bool = false,
@@ -40,17 +41,44 @@ pub const OpKind = enum(u8) {
     pipe_connect = 7,
     signal_wait = 8,
     system_info_wait = 9,
+    worker_op = 10,
+};
+
+pub const WorkOpKind = enum(u8) {
+    none = 0,
+    path_open = 1,
+    dir_read = 2,
+    path_stat = 3,
+    path_link = 4,
+    path_symlink = 5,
+    path_readlink = 6,
+    path_chmod = 7,
+    path_set_times = 8,
+    path_remove = 9,
+    path_mkdir = 10,
+    path_rename = 11,
+    handle_truncate = 12,
+    seek = 13,
+    net_cert_verify = 14,
 };
 
 pub const PendingOp = struct {
     used: bool = false,
     kind: OpKind = .none,
+    work_kind: WorkOpKind = .none,
     guest_ov: ?*pal_abi.Overlapped = null,
     handle_token: u64 = 0,
     sock_fd: usize = 0,
     pal_state: ?*anyopaque = null,
     buf: ?[*]u8 = null,
     len: usize = 0,
+    buf2: ?[*]const u8 = null,
+    len2: usize = 0,
+    flags: u32 = 0,
+    arg_i64_a: i64 = 0,
+    arg_u32_a: u32 = 0,
+    arg_i64_b: i64 = 0,
+    arg_u32_b: u32 = 0,
     positional: bool = false,
     offset: i64 = 0,
     deadline_ms: u64 = 0,
@@ -63,6 +91,7 @@ pub const PendingOp = struct {
     worker_handle: win.HANDLE = null,
     win_error: u32 = 0,
     win_ov: win.WinOverlapped = .{},
+    res_ov: pal_abi.Overlapped = .{},
 };
 
 pub const PalState = struct {
@@ -89,6 +118,10 @@ pub const PalState = struct {
     system_info_hash: u64 = 0,
     has_system_info_hash: bool = false,
     system_info_version: u32 = 1,
+    pool_ptr: ?*worker_pool.WinWorkerPool = null,
+    handles_srw: usize = 0,
+    p_acquire_srw: ?*const fn (*usize) callconv(win.win_cc) void = null,
+    p_release_srw: ?*const fn (*usize) callconv(win.win_cc) void = null,
 
     // Resolved kernel32 functions
     p_get_std_handle: ?*const fn (u32) callconv(win.win_cc) win.HANDLE = null,
@@ -122,21 +155,31 @@ pub const PalState = struct {
     p_post_queued: ?*const fn (win.HANDLE, u32, usize, ?*win.WinOverlapped) callconv(win.win_cc) i32 = null,
     p_create_thread: ?*const fn (?*anyopaque, usize, *const fn (?*anyopaque) callconv(win.win_cc) u32, ?*anyopaque, u32, ?*u32) callconv(win.win_cc) win.HANDLE = null,
     p_get_file_type: ?*const fn (win.HANDLE) callconv(win.win_cc) u32 = null,
+    p_get_proc_address: ?*const fn (?*anyopaque, [*:0]const u8) callconv(win.win_cc) ?*anyopaque = null,
+    p_load_library_a: ?*const fn ([*:0]const u8) callconv(win.win_cc) ?*anyopaque = null,
 };
 
 pub fn resolveKernel32(s: *PalState, name: [*:0]const u8) ?*anyopaque {
     const k32 = s.kernel32 orelse return null;
+    if (s.p_get_proc_address) |gp| return gp(k32, name);
     const gp = s.host.get_proc_address orelse return null;
     return gp(k32, name);
 }
 
 pub fn resolveDll(s: *PalState, mod_slot: *?*anyopaque, dll: [*:0]const u8, name: [*:0]const u8) ?*anyopaque {
-    const ll = s.host.load_library orelse return null;
-    const gp = s.host.get_proc_address orelse return null;
+    if (s.p_get_proc_address == null and s.host.get_proc_address == null) return null;
     if (mod_slot.* == null) {
-        mod_slot.* = ll(dll);
+        if (s.p_load_library_a) |lla| {
+            mod_slot.* = lla(dll);
+        } else if (s.host.load_library) |ll| {
+            mod_slot.* = ll(dll);
+        } else {
+            return null;
+        }
     }
     const m = mod_slot.* orelse return null;
+    if (s.p_get_proc_address) |gp| return gp(m, name);
+    const gp = s.host.get_proc_address orelse return null;
     return gp(m, name);
 }
 
@@ -148,21 +191,43 @@ pub fn completeInline(ov: *pal_abi.Overlapped, err: u32, continued: u64, result_
 }
 
 pub fn utf8ToWideAlloc(s: *PalState, ptr: [*]const u8, len: usize) ?[*:0]u16 {
-    const alloc = s.host.alloc orelse return null;
-    const free = s.host.free orelse return null;
     const mb = s.p_mb_to_wide orelse return null;
     if (len == 0 or len > 32767) return null;
     const wlen = mb(65001, 0, ptr, @intCast(len), null, 0);
     if (wlen <= 0) return null;
-    const buf_raw = alloc(@as(usize, @intCast(wlen + 1)) * 2) orelse return null;
-    const wbuf: [*]u16 = @ptrCast(@alignCast(buf_raw));
+    const bytes_needed = @as(usize, @intCast(wlen + 1)) * 2;
+    const buf_raw: ?*anyopaque = if (s.p_virtual_alloc) |va|
+        @ptrCast(va(null, bytes_needed, 0x3000, 0x04))
+    else if (s.host.alloc) |alloc|
+        alloc(bytes_needed)
+    else
+        null;
+    const raw = buf_raw orelse return null;
+    const wbuf: [*]u16 = @ptrCast(@alignCast(raw));
     const written = mb(65001, 0, ptr, @intCast(len), wbuf, wlen);
     if (written <= 0) {
-        free(buf_raw);
+        freeWideAlloc(s, raw);
         return null;
     }
     wbuf[@intCast(written)] = 0;
     return @ptrCast(wbuf);
+}
+
+pub fn allocNative(s: *PalState, bytes_needed: usize) ?*anyopaque {
+    if (s.p_virtual_alloc) |va| {
+        return va(null, bytes_needed, 0x3000, 0x04);
+    } else if (s.host.alloc) |alloc| {
+        return alloc(bytes_needed);
+    }
+    return null;
+}
+
+pub fn freeWideAlloc(s: *PalState, raw: *anyopaque) void {
+    if (s.p_virtual_free) |vf| {
+        _ = vf(raw, 0, 0x8000);
+    } else if (s.host.free) |free| {
+        free(raw);
+    }
 }
 
 pub fn wideToUtf8(s: *PalState, wptr: [*]const u16, wlen: i32, out: [*]u8, cap: usize) usize {
@@ -175,6 +240,8 @@ pub fn wideToUtf8(s: *PalState, wptr: [*]const u16, wlen: i32, out: [*]u8, cap: 
 
 pub fn findHandle(s: *PalState, token: u64) ?*HandleEntry {
     if (token < 3) return null;
+    if (s.p_acquire_srw) |acq| acq(&s.handles_srw);
+    defer if (s.p_release_srw) |rel| rel(&s.handles_srw);
     for (&s.handles) |*h| {
         if (h.used and h.token == token) return h;
     }
@@ -182,6 +249,8 @@ pub fn findHandle(s: *PalState, token: u64) ?*HandleEntry {
 }
 
 pub fn allocHandle(s: *PalState) ?*HandleEntry {
+    if (s.p_acquire_srw) |acq| acq(&s.handles_srw);
+    defer if (s.p_release_srw) |rel| rel(&s.handles_srw);
     for (&s.handles) |*h| {
         if (!h.used) {
             h.* = .{ .used = true, .token = s.next_token };

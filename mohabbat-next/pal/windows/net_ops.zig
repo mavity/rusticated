@@ -483,7 +483,7 @@ pub fn netCertVerify(s: *PalState, ov: *pal_abi.Overlapped, name: [*]const u8, n
         wname = mem.utf8ToWideAlloc(s, name, n_len);
     }
     defer if (wname) |wn| {
-        if (s.host.free) |free| free(@ptrCast(@constCast(wn)));
+        mem.freeWideAlloc(s, @ptrCast(@constCast(wn)));
     };
 
     var chain_para: CertChainPara = .{};

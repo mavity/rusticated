@@ -313,19 +313,19 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
         mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wcmd)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wcmd)));
     const wprog = mem.utf8ToWideAlloc(s, resolved_prog.ptr, resolved_prog.len) orelse {
         mem.completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wprog)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wprog)));
 
     var wcwd: ?[*:0]u16 = null;
     if (cwd_slice.len > 0) {
         wcwd = mem.utf8ToWideAlloc(s, cwd_slice.ptr, cwd_slice.len);
     }
     defer if (wcwd) |w| {
-        if (s.host.free) |free| free(@ptrCast(@constCast(w)));
+        mem.freeWideAlloc(s, @ptrCast(@constCast(w)));
     };
 
     var pipe_sa: win.SecurityAttributes = .{ .inherit_handle = 1 };
@@ -428,7 +428,7 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
         @memset(std.mem.asBytes(&pi), 0);
         const bare_cmd = mem.utf8ToWideAlloc(s, "cmd.exe", "cmd.exe".len) orelse null;
         defer if (bare_cmd) |b| {
-            if (s.host.free) |free| free(@ptrCast(@constCast(b)));
+            mem.freeWideAlloc(s, @ptrCast(@constCast(b)));
         };
         if (bare_cmd) |b| {
             ok = create_proc(b, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);

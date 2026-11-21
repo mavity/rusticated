@@ -91,6 +91,8 @@ pub const FutexMutex = struct {
 
 pub const WorkerSlot = struct {
     used: bool = false,
+    retired_pending: bool = false,
+    tid: i32 = 0,
     stack_base: usize = 0,
     stack_len: usize = 0,
     pool_ptr: usize = 0,
@@ -126,7 +128,23 @@ pub const LinuxWorkerPool = struct {
         return @as(u64, @intCast(@max(ts.sec, 0))) * 1_000_000_000 + @as(u64, @intCast(@max(ts.nsec, 0)));
     }
 
+    pub fn reclaimRetired(self: *LinuxWorkerPool) void {
+        self.mutex.lock();
+        for (&self.slots) |*slot| {
+            if (slot.used and slot.retired_pending and @atomicLoad(i32, &slot.tid, .acquire) == 0) {
+                const base = slot.stack_base;
+                const len = slot.stack_len;
+                slot.* = .{};
+                if (base != 0 and len != 0) {
+                    _ = sys.sys2(sys.NR.munmap, base, len);
+                }
+            }
+        }
+        self.mutex.unlock();
+    }
+
     pub fn submit(self: *LinuxWorkerPool, op_idx: u16) bool {
+        self.reclaimRetired();
         self.mutex.lock();
         if (self.policy.queued_items >= QUEUE_CAP) {
             self.mutex.unlock();
@@ -186,10 +204,12 @@ pub const LinuxWorkerPool = struct {
 
         self.slots[idx].stack_base = mres;
         self.slots[idx].stack_len = total_stack;
+        self.slots[idx].retired_pending = false;
+        @atomicStore(i32, &self.slots[idx].tid, 1, .release);
         const stack_top = (mres + total_stack) & ~@as(usize, 15);
         const slot_ptr = @intFromPtr(&self.slots[idx]);
 
-        const cres = sys.cloneThread(stack_top, workerEntry, slot_ptr);
+        const cres = sys.cloneThread(stack_top, workerEntry, slot_ptr, &self.slots[idx].tid);
         if (cres < 0) {
             _ = sys.sys2(sys.NR.munmap, mres, total_stack);
             self.mutex.lock();
@@ -245,13 +265,8 @@ pub const LinuxWorkerPool = struct {
             self.mutex.lock();
             const retired = self.policy.tryRetire(monotonicNs());
             if (retired) {
-                slot.used = false;
-                const base = slot.stack_base;
-                const len = slot.stack_len;
+                slot.retired_pending = true;
                 self.mutex.unlock();
-                _ = base;
-                _ = len;
-                // Kernel reclaims thread on exit; keep stack clean or exit directly.
                 return;
             }
             self.mutex.unlock();

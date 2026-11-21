@@ -105,7 +105,7 @@ pub fn setCwd(s: *PalState, path: [*]const u8, len: usize) u32 {
     const SetCwdWFn = *const fn ([*:0]const u16) callconv(win.win_cc) i32;
     const set_cwd_w: SetCwdWFn = @ptrCast(@alignCast(p_fn));
     const wpath = mem.utf8ToWideAlloc(s, path, len) orelse return pal_abi.ERROR_INVALID;
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
     if (set_cwd_w(wpath) == 0) {
         const gle = s.p_get_last_error orelse return pal_abi.ERROR_IO;
         return win.mapWinError(gle());

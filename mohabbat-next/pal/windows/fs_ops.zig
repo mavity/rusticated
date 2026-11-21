@@ -13,7 +13,7 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
 
     var is_dir = (flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0;
     const create = (flags & pal_abi.OPEN_FLAG_CREATE) != 0;
@@ -56,15 +56,13 @@ pub fn pathOpen(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         // Build search pattern "<wpath>\*"
         var wlen: usize = 0;
         while (wpath[wlen] != 0) : (wlen += 1) {}
-        if (s.host.alloc) |alloc| {
-            if (alloc((wlen + 3) * 2)) |pat_raw| {
-                const pat: [*]u16 = @ptrCast(@alignCast(pat_raw));
-                @memcpy(pat[0..wlen], wpath[0..wlen]);
-                pat[wlen] = '\\';
-                pat[wlen + 1] = '*';
-                pat[wlen + 2] = 0;
-                he.dir_path_w = @ptrCast(pat);
-            }
+        if (mem.allocNative(s, (wlen + 3) * 2)) |pat_raw| {
+            const pat: [*]u16 = @ptrCast(@alignCast(pat_raw));
+            @memcpy(pat[0..wlen], wpath[0..wlen]);
+            pat[wlen] = '\\';
+            pat[wlen + 1] = '*';
+            pat[wlen + 2] = 0;
+            he.dir_path_w = @ptrCast(pat);
         }
         mem.completeInline(ov, 0, 0, he.token);
         return;
@@ -300,7 +298,7 @@ pub fn pathStat(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: u
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
 
     const GetAttrFn = *const fn ([*:0]const u16, u32, *win.Win32FileAttributeData) callconv(win.win_cc) i32;
     const get_attr: GetAttrFn = @ptrCast(@alignCast(p_attr));
@@ -427,7 +425,7 @@ pub fn pathRemove(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len:
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
     const is_dir = (flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0;
     const fn_name: [*:0]const u8 = if (is_dir) "RemoveDirectoryW" else "DeleteFileW";
     const p_fn = mem.resolveKernel32(s, fn_name) orelse {
@@ -481,7 +479,8 @@ pub fn pathMkdir(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: 
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
+
     const p_fn = mem.resolveKernel32(s, "CreateDirectoryW") orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
@@ -504,12 +503,12 @@ pub fn pathRename(s: *PalState, ov: *pal_abi.Overlapped, old_p: [*]const u8, o_l
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_old)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_old)));
     const w_new = mem.utf8ToWideAlloc(s, new_p, n_len) orelse {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_new)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_new)));
     const p_fn = mem.resolveKernel32(s, "MoveFileExW") orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
@@ -533,7 +532,7 @@ pub fn pathChmod(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, len: 
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
 
     const create_file = s.p_create_file_w orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
@@ -678,7 +677,7 @@ pub fn pathSetTimes(
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
 
     var win_flags: u32 = 0x0200_0000; // FILE_FLAG_BACKUP_SEMANTICS
     if ((flags & PathTimesFlag.nofollow) != 0) {
@@ -719,12 +718,12 @@ pub fn pathLink(s: *PalState, ov: *pal_abi.Overlapped, src: [*]const u8, s_len: 
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_src)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_src)));
     const w_dst = mem.utf8ToWideAlloc(s, dst, d_len) orelse {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_dst)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_dst)));
     const p_fn = mem.resolveKernel32(s, "CreateHardLinkW") orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
@@ -785,12 +784,12 @@ pub fn pathSymlink(s: *PalState, ov: *pal_abi.Overlapped, target: [*]const u8, t
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_tgt)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_tgt)));
     const w_lnk = mem.utf8ToWideAlloc(s, link, l_len) orelse {
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(w_lnk)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(w_lnk)));
     const p_fn = mem.resolveKernel32(s, "CreateSymbolicLinkW") orelse {
         mem.completeInline(ov, pal_abi.ERROR_UNSUPPORTED, 0, 0);
         return;
@@ -823,7 +822,7 @@ pub fn pathReadlink(s: *PalState, ov: *pal_abi.Overlapped, path: [*]const u8, le
         mem.completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
     };
-    defer if (s.host.free) |free| free(@ptrCast(@constCast(wpath)));
+    defer mem.freeWideAlloc(s, @ptrCast(@constCast(wpath)));
 
     // FILE_FLAG_OPEN_REPARSE_POINT (0x00200000) | FILE_FLAG_BACKUP_SEMANTICS (0x02000000)
     const h = cf(wpath, 0, 0x7, null, 3, 0x0220_0000, null);
