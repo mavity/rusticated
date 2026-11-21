@@ -1071,6 +1071,7 @@
 
     const term = new dependencies.Terminal({
       cursorBlink: true,
+      screenReaderMode: true,
       allowProposedApi: true,
       customGlyphs: true,
       rescaleOverlappingGlyphs: true,

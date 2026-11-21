@@ -2079,6 +2079,7 @@ test('bootFromGuest loads @xterm/addon-unicode-graphemes@0.4.0 and activates 15-
     'expected @xterm/addon-unicode-graphemes@0.4.0/+esm to be imported'
   );
   assert.equal(mounted.term.options.allowProposedApi, true);
+  assert.equal(mounted.term.options.screenReaderMode, true);
   assert.equal(mounted.term.options.customGlyphs, true);
   assert.equal(mounted.term.options.rescaleOverlappingGlyphs, true);
   assert.match(mounted.term.options.fontFamily, /Apple Color Emoji/);
