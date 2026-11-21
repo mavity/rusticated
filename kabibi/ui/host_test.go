@@ -687,3 +687,62 @@ func TestHost_OSCCoalescingReaderPreventsSplitLeak(t *testing.T) {
 		t.Fatalf("event[0] = %T, want input.BackgroundColorEvent", events[0])
 	}
 }
+
+func TestHost_SlidingWindowThemeQueryAndMaxWait(t *testing.T) {
+	var out bytes.Buffer
+	widget := &recordingWidget{}
+	h := NewHost(widget, false)
+	h.out = bufio.NewWriter(&out)
+	h.queryThemeColors = true
+	h.themeQueryDebounceDur = 50 * time.Millisecond
+	h.themeQueryMaxWaitDur = 120 * time.Millisecond
+	defer h.stopThemeQuery()
+
+	sizeFn := func(uintptr) (int, int, error) { return 10, 5, nil }
+
+	// First frame emits immediately.
+	h.runFrame(sizeFn)
+	if !strings.Contains(out.String(), ansi.RequestForegroundColor) {
+		t.Fatalf("first frame did not emit OSC 10 query")
+	}
+
+	// Redraws every 25ms push the 50ms sliding window out, but the 120ms max-wait cap must fire.
+	out.Reset()
+	for i := 0; i < 4; i++ {
+		time.Sleep(25 * time.Millisecond)
+		widget.cursor = CursorPos{X: i + 1, Y: 0, Visible: true}
+		h.currBuf = terminal.NewCellBuf(10, 5)
+		h.runFrame(sizeFn)
+		if strings.Contains(out.String(), ansi.RequestForegroundColor) {
+			t.Fatalf("redraw %d emitted OSC 10 inline instead of deferring", i)
+		}
+	}
+
+	// Wait for the max-wait timer to enqueue hostMsgThemeQuery.
+	select {
+	case msg := <-h.msgCh:
+		if msg.kind != hostMsgThemeQuery {
+			t.Fatalf("msg.kind = %d, want hostMsgThemeQuery", msg.kind)
+		}
+		needsRender := false
+		h.handleHostMsg(msg, &needsRender, sizeFn)
+		if needsRender {
+			t.Fatal("hostMsgThemeQuery unexpectedly marked needsRender=true")
+		}
+		if !strings.Contains(out.String(), ansi.RequestForegroundColor) || !strings.Contains(out.String(), ansi.RequestBackgroundColor) {
+			t.Fatalf("hostMsgThemeQuery did not emit OSC 10/11 queries: %q", out.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for max-wait theme query")
+	}
+
+	// First ForegroundColorEvent sets HasDefaultFG=true; a subsequent identical event must not trigger a redraw.
+	needsRender := false
+	ev := input.ForegroundColorEvent{Color: color.RGBA{R: 0xE5, G: 0xE5, B: 0xE5, A: 0xFF}}
+	h.handleHostMsg(hostMsg{kind: hostMsgInput, inputEvent: ev}, &needsRender, sizeFn)
+	needsRender = false
+	h.handleHostMsg(hostMsg{kind: hostMsgInput, inputEvent: ev}, &needsRender, sizeFn)
+	if needsRender {
+		t.Fatal("unchanged ForegroundColorEvent triggered redraw")
+	}
+}

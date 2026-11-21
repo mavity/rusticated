@@ -21,7 +21,10 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
-const themeQueryInterval = time.Second
+const (
+	themeQueryDebounce = time.Second
+	themeQueryMaxWait  = 20 * time.Second
+)
 
 const kittyKeyboardFlags = ansi.KittyDisambiguateEscapeCodes |
 	ansi.KittyReportAlternateKeys |
@@ -36,6 +39,7 @@ const (
 	hostMsgInvalidate
 	hostMsgScrollback
 	hostMsgResize
+	hostMsgThemeQuery
 	hostMsgStop
 )
 
@@ -80,9 +84,14 @@ type Host struct {
 	stopCh        chan struct{}
 	prevTermState *term.State // holds the saved terminal state needed to restore cooked mode on exit.
 
-	theme            Theme
-	queryThemeColors bool
-	lastThemeQuery   time.Time
+	theme                 Theme
+	queryThemeColors      bool
+	lastThemeQuery        time.Time
+	themeQueryTimer       *time.Timer
+	themeQueryWindowStart time.Time
+	themeQueryStopped     bool
+	themeQueryDebounceDur time.Duration
+	themeQueryMaxWaitDur  time.Duration
 }
 
 // handleSignals installs platform-specific signal handlers.
@@ -278,6 +287,7 @@ func (h *Host) runCore(
 
 	// Run central event coordinator loop on this main host goroutine
 	h.processLoop(getSizeFunc)
+	h.stopThemeQuery()
 	if h.verbose {
 		fmt.Fprintln(os.Stderr, "[kabibi] Host.runCore process loop returned")
 	}
@@ -390,6 +400,8 @@ func (h *Host) handleHostMsg(
 		*needsRender = true
 	case hostMsgScrollback:
 		h.runScrollbackFrame(getSizeFunc)
+	case hostMsgThemeQuery:
+		h.emitThemeQueryNow()
 	}
 }
 
@@ -672,6 +684,9 @@ func (h *Host) runFrame(
 		h.emitCursorOnly()
 	}
 
+	if h.hasRenderedOnce {
+		h.scheduleThemeQueryLocked()
+	}
 	h.prevCursorX = h.cursorX
 	h.prevCursorY = h.cursorY
 	h.prevCursorVisible = h.cursorVisible
@@ -800,16 +815,69 @@ func (h *Host) appendThrottledThemeQuery(sb *strings.Builder) {
 	if !h.queryThemeColors {
 		return
 	}
-	if h.theme.HasDefaultFG && h.theme.HasDefaultBG {
+	if h.lastThemeQuery.IsZero() {
+		h.lastThemeQuery = time.Now()
+		sb.WriteString(ansi.RequestForegroundColor)
+		sb.WriteString(ansi.RequestBackgroundColor)
 		return
+	}
+	h.scheduleThemeQueryLocked()
+}
+
+func (h *Host) scheduleThemeQueryLocked() {
+	if !h.queryThemeColors || h.themeQueryStopped {
+		return
+	}
+	debounce := h.themeQueryDebounceDur
+	if debounce <= 0 {
+		debounce = themeQueryDebounce
+	}
+	maxWait := h.themeQueryMaxWaitDur
+	if maxWait <= 0 {
+		maxWait = themeQueryMaxWait
 	}
 	now := time.Now()
-	if !h.lastThemeQuery.IsZero() && now.Sub(h.lastThemeQuery) < themeQueryInterval {
+	if h.themeQueryWindowStart.IsZero() {
+		h.themeQueryWindowStart = now
+	}
+	remainingMax := h.themeQueryWindowStart.Add(maxWait).Sub(now)
+	if remainingMax < 0 {
+		remainingMax = 0
+	}
+	delay := debounce
+	if remainingMax < delay {
+		delay = remainingMax
+	}
+	if h.themeQueryTimer == nil {
+		h.themeQueryTimer = time.AfterFunc(delay, func() {
+			h.sendMsg(hostMsg{kind: hostMsgThemeQuery})
+		})
 		return
 	}
-	h.lastThemeQuery = now
-	sb.WriteString(ansi.RequestForegroundColor)
-	sb.WriteString(ansi.RequestBackgroundColor)
+	h.themeQueryTimer.Reset(delay)
+}
+
+func (h *Host) emitThemeQueryNow() {
+	h.mu.Lock()
+	if !h.queryThemeColors || h.themeQueryStopped || h.out == nil {
+		h.mu.Unlock()
+		return
+	}
+	h.themeQueryWindowStart = time.Time{}
+	h.lastThemeQuery = time.Now()
+	_, _ = h.out.WriteString(ansi.RequestForegroundColor + ansi.RequestBackgroundColor)
+	_ = h.out.Flush()
+	h.mu.Unlock()
+}
+
+func (h *Host) stopThemeQuery() {
+	h.mu.Lock()
+	h.themeQueryStopped = true
+	if h.themeQueryTimer != nil {
+		h.themeQueryTimer.Stop()
+		h.themeQueryTimer = nil
+	}
+	h.mu.Unlock()
 }
 
 func (h *Host) emitCursorOnly() {
