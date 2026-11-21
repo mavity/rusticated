@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const pal_abi = @import("pal_abi");
 const sys = @import("linux_sys.zig");
+const worker_pool = @import("worker_pool.zig");
 
 const UnixPlatformHost = extern struct {
     runtime_slice: [*]const u8,
@@ -41,17 +42,52 @@ const OpKind = enum(u8) {
     signal_wait = 6,
     system_info_wait = 7,
     dns_lookup = 8,
+    write_fd = 9,
+    net_connect = 10,
+    worker_op = 11,
+};
+
+const WorkOpKind = enum(u8) {
+    none = 0,
+    path_open = 1,
+    dir_read = 2,
+    path_stat = 3,
+    path_link = 4,
+    path_symlink = 5,
+    path_readlink = 6,
+    path_chmod = 7,
+    path_set_times = 8,
+    path_remove = 9,
+    path_mkdir = 10,
+    path_rename = 11,
+    handle_truncate = 12,
+    net_cert_verify = 13,
 };
 
 const PendingOp = struct {
     used: bool = false,
     kind: OpKind = .none,
+    work_kind: WorkOpKind = .none,
     guest_ov: ?*pal_abi.Overlapped = null,
     fd: i32 = -1,
     pid: i32 = -1,
     signum: u32 = 0,
     buf: ?[*]u8 = null,
     len: usize = 0,
+    buf2: ?[*]const u8 = null,
+    len2: usize = 0,
+    flags: u32 = 0,
+    arg_i64_a: i64 = 0,
+    arg_u32_a: u32 = 0,
+    arg_i64_b: i64 = 0,
+    arg_u32_b: u32 = 0,
+    is_dir: bool = false,
+    is_udp: bool = false,
+    canceled: bool = false,
+    worker_done: u32 = 0,
+    res_err: u32 = 0,
+    res_ext: u64 = 0,
+    res_cont: u64 = 0,
     deadline_ns: u64 = 0,
 };
 
@@ -65,6 +101,8 @@ const PalState = struct {
     has_saved_termios: bool = false,
     signal_fd: i32 = -1,
     signal_mask: u64 = 0,
+    event_fd: i32 = -1,
+    pool_ptr: ?*worker_pool.LinuxWorkerPool = null,
     system_info_hash: u64 = 0,
     has_system_info_hash: bool = false,
     system_info_version: u32 = 1,
@@ -487,7 +525,12 @@ fn abiCancel(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
     for (&s.ops) |*op| {
         if (op.used and op.guest_ov == ov) {
-            if (op.kind == .dns_lookup and op.fd >= 0) {
+            if (op.kind == .worker_op) {
+                @atomicStore(bool, &op.canceled, true, .release);
+                completeInline(ov, pal_abi.ERROR_CANCELED, 0, 0);
+                return;
+            }
+            if ((op.kind == .dns_lookup or op.kind == .net_connect) and op.fd >= 0) {
                 _ = sys.sys1(sys.NR.close, @intCast(op.fd));
             }
             freeOp(s, op);
@@ -521,8 +564,24 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         return;
     };
     if (he.is_pty) {
+        if (len == 0) {
+            completeInline(ov, 0, 0, 0);
+            return;
+        }
         const res = sys.sys3(sys.NR.read, @intCast(he.pty_read_fd), @intFromPtr(buf), len);
         if (sys.isErr(res)) |e| {
+            if (e == 11) {
+                const op = allocOp(s) orelse {
+                    completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                    return;
+                };
+                op.kind = .read_fd;
+                op.guest_ov = ov;
+                op.fd = he.pty_read_fd;
+                op.buf = buf;
+                op.len = len;
+                return;
+            }
             completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
             return;
         }
@@ -530,15 +589,26 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
         return;
     }
     if (he.is_udp) {
-        const op = allocOp(s) orelse {
-            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        var sa: sys.SockAddrIn = undefined;
+        var sa_len: u32 = @sizeOf(sys.SockAddrIn);
+        const res = sys.sys6(sys.NR.recvfrom, @intCast(he.fd), @intFromPtr(buf), len, 0, @intFromPtr(&sa), @intFromPtr(&sa_len));
+        if (sys.isErr(res)) |e| {
+            if (e == 11) {
+                const op = allocOp(s) orelse {
+                    completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                    return;
+                };
+                op.kind = .udp_read;
+                op.guest_ov = ov;
+                op.fd = he.fd;
+                op.buf = buf;
+                op.len = len;
+                return;
+            }
+            completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
             return;
-        };
-        op.kind = .udp_read;
-        op.guest_ov = ov;
-        op.fd = he.fd;
-        op.buf = buf;
-        op.len = len;
+        }
+        completeInline(ov, 0, 0, res);
         return;
     }
     const positional = (ov.flags & pal_abi.READ_FLAG_POSITIONAL) != 0;
@@ -553,6 +623,18 @@ fn abiRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callcon
     } else sys.sys3(sys.NR.read, @intCast(he.fd), @intFromPtr(buf), len);
 
     if (sys.isErr(res)) |e| {
+        if (e == 11 and !positional) {
+            const op = allocOp(s) orelse {
+                completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                return;
+            };
+            op.kind = .read_fd;
+            op.guest_ov = ov;
+            op.fd = he.fd;
+            op.buf = buf;
+            op.len = len;
+            return;
+        }
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
     }
@@ -566,19 +648,40 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
             if (he.is_pty) {
                 const res = sys.sys3(sys.NR.write, @intCast(he.pty_write_fd), @intFromPtr(buf), len);
                 if (sys.isErr(res)) |e| {
+                    if (e == 11) {
+                        const op = allocOp(s) orelse {
+                            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                            return;
+                        };
+                        op.kind = .write_fd;
+                        op.guest_ov = ov;
+                        op.fd = he.pty_write_fd;
+                        op.buf = @constCast(buf);
+                        op.len = len;
+                        return;
+                    }
                     completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
                     return;
                 }
                 completeInline(ov, 0, 0, res);
                 return;
             }
-        }
-    }
-    if (handle >= 3) {
-        if (findHandle(s, handle)) |he| {
             if (he.is_udp) {
                 const res = sys.sys6(sys.NR.sendto, @intCast(he.fd), @intFromPtr(buf), len, 0, 0, 0);
                 if (sys.isErr(res)) |e| {
+                    if (e == 11) {
+                        const op = allocOp(s) orelse {
+                            completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                            return;
+                        };
+                        op.kind = .write_fd;
+                        op.guest_ov = ov;
+                        op.fd = he.fd;
+                        op.is_udp = true;
+                        op.buf = @constCast(buf);
+                        op.len = len;
+                        return;
+                    }
                     completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
                     return;
                 }
@@ -609,6 +712,18 @@ fn abiWrite(ov: *pal_abi.Overlapped, handle: u64, buf: [*]const u8, len: usize) 
         break :blk sys.sys4(sys.NR.pwrite64, @intCast(fd), @intFromPtr(buf), len, @bitCast(off));
     } else sys.sys3(sys.NR.write, @intCast(fd), @intFromPtr(buf), len);
     if (sys.isErr(res)) |e| {
+        if (e == 11 and !positional) {
+            const op = allocOp(s) orelse {
+                completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                return;
+            };
+            op.kind = .write_fd;
+            op.guest_ov = ov;
+            op.fd = fd;
+            op.buf = @constCast(buf);
+            op.len = len;
+            return;
+        }
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
     }
@@ -633,84 +748,45 @@ fn abiSeek(ov: *pal_abi.Overlapped, handle: u64, off: i64, whence: u32) callconv
     completeInline(ov, 0, 0, res);
 }
 
-fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(pal_abi.pal_cc) void {
-    if (size < 0) {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    }
-    const s = statePtr();
-    const he = findHandle(s, handle) orelse {
-        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
-        return;
-    };
-    const res = sys.sys2(sys.NR.ftruncate, @intCast(he.fd), @bitCast(size));
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
-    }
-    completeInline(ov, 0, 0, 0);
-}
-
-fn abiHandleClose(handle: u64) callconv(pal_abi.pal_cc) void {
-    const s = statePtr();
-    const he = findHandle(s, handle) orelse return;
-    if (he.is_pty) {
-        if (he.pty_read_fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.pty_read_fd));
-        if (he.pty_write_fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.pty_write_fd));
-        he.* = .{};
-        return;
-    }
-    if (he.fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.fd));
-    he.* = .{};
-}
-
-fn abiPathOpen(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(pal_abi.pal_cc) void {
-    const s = statePtr();
+fn execPathOpen(op: *PendingOp) void {
     var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+    const cpath = toCPath(op.buf.?, op.len, &cbuf) orelse {
+        op.res_err = pal_abi.ERROR_INVALID;
         return;
     };
-    var oflags: u32 = switch (flags & 3) {
+    var oflags: u32 = switch (op.flags & 3) {
         0 => sys.O_RDONLY,
         1 => sys.O_WRONLY,
         else => sys.O_RDWR,
     };
-    if ((flags & pal_abi.OPEN_FLAG_CREATE) != 0) oflags |= sys.O_CREAT;
-    if ((flags & pal_abi.OPEN_FLAG_EXCL) != 0) oflags |= sys.O_EXCL;
-    if ((flags & pal_abi.OPEN_FLAG_TRUNC) != 0) oflags |= sys.O_TRUNC;
-    if ((flags & pal_abi.OPEN_FLAG_APPEND) != 0) oflags |= sys.O_APPEND;
-    if ((flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0) oflags |= sys.O_DIRECTORY;
+    if ((op.flags & pal_abi.OPEN_FLAG_CREATE) != 0) oflags |= sys.O_CREAT;
+    if ((op.flags & pal_abi.OPEN_FLAG_EXCL) != 0) oflags |= sys.O_EXCL;
+    if ((op.flags & pal_abi.OPEN_FLAG_TRUNC) != 0) oflags |= sys.O_TRUNC;
+    if ((op.flags & pal_abi.OPEN_FLAG_APPEND) != 0) oflags |= sys.O_APPEND;
+    if ((op.flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0) oflags |= sys.O_DIRECTORY;
 
     const res = sys.sys4(sys.NR.openat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), oflags, 0o666);
     if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        op.res_err = sys.mapLinuxErrno(e);
         return;
     }
-    const he = allocHandle(s) orelse {
-        _ = sys.sys1(sys.NR.close, res);
-        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
-        return;
-    };
-    he.fd = @intCast(res);
-    he.is_dir = (flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0;
-    completeInline(ov, 0, 0, he.token);
+    op.fd = @intCast(res);
+    op.is_dir = (op.flags & pal_abi.OPEN_FLAG_DIRECTORY) != 0;
+    op.res_err = 0;
 }
 
-fn abiDirRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(pal_abi.pal_cc) void {
-    const s = statePtr();
-    const he = findHandle(s, handle) orelse {
-        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
-        return;
-    };
+fn execDirRead(op: *PendingOp) void {
+    const buf = op.buf.?;
+    const len = op.len;
     var raw: [4096]u8 = undefined;
-    const res = sys.sys3(sys.NR.getdents64, @intCast(he.fd), @intFromPtr(&raw), raw.len);
+    const res = sys.sys3(sys.NR.getdents64, @intCast(op.fd), @intFromPtr(&raw), raw.len);
     if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        op.res_err = sys.mapLinuxErrno(e);
         return;
     }
     if (res == 0) {
-        completeInline(ov, 0, 0, 0);
+        op.res_err = 0;
+        op.res_ext = 0;
         return;
     }
     var pos: usize = 0;
@@ -735,24 +811,21 @@ fn abiDirRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) call
         }
         pos += reclen;
     }
-    completeInline(ov, 0, 0, out_pos);
+    op.res_err = 0;
+    op.res_ext = out_pos;
 }
 
-fn abiPathStat(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32, out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) void {
-    if (cap < @sizeOf(pal_abi.AbiStat)) {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    }
+fn execPathStat(op: *PendingOp) void {
     var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+    const cpath = toCPath(op.buf2.?, op.len2, &cbuf) orelse {
+        op.res_err = pal_abi.ERROR_INVALID;
         return;
     };
     var lst: sys.LinuxStat = undefined;
-    const at_flags: u32 = if ((flags & pal_abi.PATH_STAT_FLAG_NOFOLLOW) != 0) sys.AT_SYMLINK_NOFOLLOW else 0;
+    const at_flags: u32 = if ((op.flags & pal_abi.PATH_STAT_FLAG_NOFOLLOW) != 0) sys.AT_SYMLINK_NOFOLLOW else 0;
     const res = sys.sys4(sys.NR.newfstatat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), @intFromPtr(&lst), at_flags);
     if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        op.res_err = sys.mapLinuxErrno(e);
         return;
     }
     var st: pal_abi.AbiStat = .{};
@@ -781,143 +854,417 @@ fn abiPathStat(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u3
     st.blocks = lst.blocks;
     st.valid_mask = 0x1f;
     const bytes = std.mem.asBytes(&st);
-    @memcpy(out[0..bytes.len], bytes);
-    completeInline(ov, 0, 0, 0);
+    @memcpy(op.buf.?[0..bytes.len], bytes);
+    op.res_err = 0;
+}
+
+fn executeWorkItem(ctx: *anyopaque, op_idx: u16) void {
+    const s: *PalState = @ptrCast(@alignCast(ctx));
+    const op = &s.ops[op_idx];
+    switch (op.work_kind) {
+        .path_open => execPathOpen(op),
+        .dir_read => execDirRead(op),
+        .path_stat => execPathStat(op),
+        .handle_truncate => {
+            const res = sys.sys2(sys.NR.ftruncate, @intCast(op.fd), @bitCast(op.arg_i64_a));
+            op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+        },
+        .path_link => {
+            var b1: [4096]u8 = undefined;
+            var b2: [4096]u8 = undefined;
+            const s1 = toCPath(op.buf.?, op.len, &b1);
+            const s2 = toCPath(op.buf2.?, op.len2, &b2);
+            if (s1 == null or s2 == null) {
+                op.res_err = pal_abi.ERROR_INVALID;
+            } else {
+                const cwd: usize = @bitCast(@as(isize, sys.AT_FDCWD));
+                const res = sys.sys6(sys.NR.linkat, cwd, @intFromPtr(s1.?), cwd, @intFromPtr(s2.?), 0, 0);
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            }
+        },
+        .path_symlink => {
+            var b1: [4096]u8 = undefined;
+            var b2: [4096]u8 = undefined;
+            const s1 = toCPath(op.buf.?, op.len, &b1);
+            const s2 = toCPath(op.buf2.?, op.len2, &b2);
+            if (s1 == null or s2 == null) {
+                op.res_err = pal_abi.ERROR_INVALID;
+            } else {
+                const res = sys.sys3(sys.NR.symlinkat, @intFromPtr(s1.?), @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(s2.?));
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            }
+        },
+        .path_readlink => {
+            var cbuf: [4096]u8 = undefined;
+            if (toCPath(op.buf2.?, op.len2, &cbuf)) |cpath| {
+                const res = sys.sys4(sys.NR.readlinkat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), @intFromPtr(op.buf.?), op.len);
+                if (sys.isErr(res)) |e| {
+                    op.res_err = sys.mapLinuxErrno(e);
+                } else {
+                    op.res_err = 0;
+                    op.res_ext = res;
+                }
+            } else {
+                op.res_err = pal_abi.ERROR_INVALID;
+            }
+        },
+        .path_chmod => {
+            var cbuf: [4096]u8 = undefined;
+            if (toCPath(op.buf.?, op.len, &cbuf)) |cpath| {
+                const res = sys.sys4(sys.NR.fchmodat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), op.flags, 0);
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            } else {
+                op.res_err = pal_abi.ERROR_INVALID;
+            }
+        },
+        .path_set_times => {
+            var cbuf: [4096]u8 = undefined;
+            if (toCPath(op.buf.?, op.len, &cbuf)) |cpath| {
+                var times = [2]sys.Timespec{
+                    .{ .sec = op.arg_i64_a, .nsec = op.arg_u32_a },
+                    .{ .sec = op.arg_i64_b, .nsec = op.arg_u32_b },
+                };
+                const at_flags: u32 = if ((op.flags & pal_abi.PATH_SET_TIMES_FLAG_NOFOLLOW) != 0) sys.AT_SYMLINK_NOFOLLOW else 0;
+                const res = sys.sys4(sys.NR.utimensat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), @intFromPtr(&times), at_flags);
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            } else {
+                op.res_err = pal_abi.ERROR_INVALID;
+            }
+        },
+        .path_remove => {
+            var cbuf: [4096]u8 = undefined;
+            if (toCPath(op.buf.?, op.len, &cbuf)) |cpath| {
+                const at_flags: u32 = if ((op.flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0) sys.AT_REMOVEDIR else 0;
+                const res = sys.sys3(sys.NR.unlinkat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), at_flags);
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            } else {
+                op.res_err = pal_abi.ERROR_INVALID;
+            }
+        },
+        .path_mkdir => {
+            var cbuf: [4096]u8 = undefined;
+            if (toCPath(op.buf.?, op.len, &cbuf)) |cpath| {
+                const res = sys.sys3(sys.NR.mkdirat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), op.flags);
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            } else {
+                op.res_err = pal_abi.ERROR_INVALID;
+            }
+        },
+        .path_rename => {
+            var b1: [4096]u8 = undefined;
+            var b2: [4096]u8 = undefined;
+            const s1 = toCPath(op.buf.?, op.len, &b1);
+            const s2 = toCPath(op.buf2.?, op.len2, &b2);
+            if (s1 == null or s2 == null) {
+                op.res_err = pal_abi.ERROR_INVALID;
+            } else {
+                const cwd: usize = @bitCast(@as(isize, sys.AT_FDCWD));
+                const res = sys.sys4(sys.NR.renameat, cwd, @intFromPtr(s1.?), cwd, @intFromPtr(s2.?));
+                op.res_err = if (sys.isErr(res)) |e| sys.mapLinuxErrno(e) else 0;
+            }
+        },
+        .net_cert_verify => {
+            op.res_err = verifyCertChainBytes(s, op.buf.?[0..op.len], op.buf2.?[0..op.len2]);
+        },
+        .none => {},
+    }
+    @atomicStore(u32, &op.worker_done, 1, .release);
+}
+
+fn opIndex(s: *PalState, op: *PendingOp) u16 {
+    return @intCast((@intFromPtr(op) - @intFromPtr(&s.ops[0])) / @sizeOf(PendingOp));
+}
+
+fn submitOrRunInline(s: *PalState, op: *PendingOp) void {
+    if (s.pool_ptr) |pool| {
+        if (pool.submit(opIndex(s, op))) return;
+    }
+    executeWorkItem(s, opIndex(s, op));
+    finishWorkerOp(s, op);
+}
+
+fn finishWorkerOp(s: *PalState, op: *PendingOp) void {
+    const canceled = @atomicLoad(bool, &op.canceled, .acquire);
+    const gov = op.guest_ov.?;
+    const wkind = op.work_kind;
+    const err = op.res_err;
+    const ext = op.res_ext;
+    const cont = op.res_cont;
+    const fd = op.fd;
+    const is_dir = op.is_dir;
+    freeOp(s, op);
+    if (canceled) {
+        if (wkind == .path_open and err == 0 and fd >= 0) {
+            _ = sys.sys1(sys.NR.close, @intCast(fd));
+        }
+        return;
+    }
+    if (wkind == .path_open and err == 0) {
+        const he = allocHandle(s) orelse {
+            _ = sys.sys1(sys.NR.close, @intCast(fd));
+            completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
+            return;
+        };
+        he.fd = fd;
+        he.is_dir = is_dir;
+        completeInline(gov, 0, 0, he.token);
+        return;
+    }
+    completeInline(gov, err, cont, ext);
+}
+
+fn abiHandleTruncate(ov: *pal_abi.Overlapped, handle: u64, size: i64) callconv(pal_abi.pal_cc) void {
+    if (size < 0) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const s = statePtr();
+    const he = findHandle(s, handle) orelse {
+        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
+        return;
+    };
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .handle_truncate;
+    op.guest_ov = ov;
+    op.fd = he.fd;
+    op.arg_i64_a = size;
+    submitOrRunInline(s, op);
+}
+
+fn abiHandleClose(handle: u64) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const he = findHandle(s, handle) orelse return;
+    if (he.is_pty) {
+        if (he.pty_read_fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.pty_read_fd));
+        if (he.pty_write_fd >= 0 and he.pty_write_fd != he.pty_read_fd) _ = sys.sys1(sys.NR.close, @intCast(he.pty_write_fd));
+        he.* = .{};
+        return;
+    }
+    if (he.fd >= 0) _ = sys.sys1(sys.NR.close, @intCast(he.fd));
+    he.* = .{};
+}
+
+fn abiPathOpen(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(pal_abi.pal_cc) void {
+    if (len == 0 or len >= 4096) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_open;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = flags;
+    submitOrRunInline(s, op);
+}
+
+fn abiDirRead(ov: *pal_abi.Overlapped, handle: u64, buf: [*]u8, len: usize) callconv(pal_abi.pal_cc) void {
+    const s = statePtr();
+    const he = findHandle(s, handle) orelse {
+        completeInline(ov, pal_abi.ERROR_BADF, 0, 0);
+        return;
+    };
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .dir_read;
+    op.guest_ov = ov;
+    op.fd = he.fd;
+    op.buf = buf;
+    op.len = len;
+    submitOrRunInline(s, op);
+}
+
+fn abiPathStat(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32, out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) void {
+    if (cap < @sizeOf(pal_abi.AbiStat) or len == 0 or len >= 4096) {
+        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
+        return;
+    }
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_stat;
+    op.guest_ov = ov;
+    op.buf2 = path;
+    op.len2 = len;
+    op.buf = out;
+    op.len = cap;
+    op.flags = flags;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathLink(ov: *pal_abi.Overlapped, src: [*]const u8, s_len: usize, dst: [*]const u8, d_len: usize, _: u32) callconv(pal_abi.pal_cc) void {
-    var b1: [4096]u8 = undefined;
-    var b2: [4096]u8 = undefined;
-    const s1 = toCPath(src, s_len, &b1) orelse {
+    if (s_len == 0 or s_len >= 4096 or d_len == 0 or d_len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const s2 = toCPath(dst, d_len, &b2) orelse {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const cwd: usize = @bitCast(@as(isize, sys.AT_FDCWD));
-    const res = sys.sys6(sys.NR.linkat, cwd, @intFromPtr(s1), cwd, @intFromPtr(s2), 0, 0);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_link;
+    op.guest_ov = ov;
+    op.buf = @constCast(src);
+    op.len = s_len;
+    op.buf2 = dst;
+    op.len2 = d_len;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathSymlink(ov: *pal_abi.Overlapped, target: [*]const u8, t_len: usize, link: [*]const u8, l_len: usize, _: u32) callconv(pal_abi.pal_cc) void {
-    var b1: [4096]u8 = undefined;
-    var b2: [4096]u8 = undefined;
-    const s1 = toCPath(target, t_len, &b1) orelse {
+    if (t_len == 0 or t_len >= 4096 or l_len == 0 or l_len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const s2 = toCPath(link, l_len, &b2) orelse {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const res = sys.sys3(sys.NR.symlinkat, @intFromPtr(s1), @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(s2));
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_symlink;
+    op.guest_ov = ov;
+    op.buf = @constCast(target);
+    op.len = t_len;
+    op.buf2 = link;
+    op.len2 = l_len;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathReadlink(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, out: [*]u8, cap: usize) callconv(pal_abi.pal_cc) void {
-    var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
+    if (len == 0 or len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
-    const res = sys.sys4(sys.NR.readlinkat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), @intFromPtr(out), cap);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
     }
-    completeInline(ov, 0, 0, res);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_readlink;
+    op.guest_ov = ov;
+    op.buf2 = path;
+    op.len2 = len;
+    op.buf = out;
+    op.len = cap;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathChmod(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(pal_abi.pal_cc) void {
-    var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
+    if (len == 0 or len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
-    const res = sys.sys4(sys.NR.fchmodat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), mode, 0);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_chmod;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = mode;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathSetTimes(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, at_sec: i64, at_nsec: u32, mt_sec: i64, mt_nsec: u32, flags: u32) callconv(pal_abi.pal_cc) void {
-    var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
+    if (len == 0 or len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
-    var times = [2]sys.Timespec{
-        .{ .sec = at_sec, .nsec = at_nsec },
-        .{ .sec = mt_sec, .nsec = mt_nsec },
-    };
-    const at_flags: u32 = if ((flags & pal_abi.PATH_SET_TIMES_FLAG_NOFOLLOW) != 0) sys.AT_SYMLINK_NOFOLLOW else 0;
-    const res = sys.sys4(sys.NR.utimensat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), @intFromPtr(&times), at_flags);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_set_times;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.arg_i64_a = at_sec;
+    op.arg_u32_a = at_nsec;
+    op.arg_i64_b = mt_sec;
+    op.arg_u32_b = mt_nsec;
+    op.flags = flags;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathRemove(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, flags: u32) callconv(pal_abi.pal_cc) void {
-    var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
+    if (len == 0 or len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
-    const at_flags: u32 = if ((flags & (pal_abi.PATH_REMOVE_FLAG_DIR | 0x200)) != 0) sys.AT_REMOVEDIR else 0;
-    const res = sys.sys3(sys.NR.unlinkat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), at_flags);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_remove;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = flags;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathMkdir(ov: *pal_abi.Overlapped, path: [*]const u8, len: usize, mode: u32) callconv(pal_abi.pal_cc) void {
-    var cbuf: [4096]u8 = undefined;
-    const cpath = toCPath(path, len, &cbuf) orelse {
+    if (len == 0 or len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
         return;
-    };
-    const res = sys.sys3(sys.NR.mkdirat, @bitCast(@as(isize, sys.AT_FDCWD)), @intFromPtr(cpath), mode);
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_mkdir;
+    op.guest_ov = ov;
+    op.buf = @constCast(path);
+    op.len = len;
+    op.flags = mode;
+    submitOrRunInline(s, op);
 }
 
 fn abiPathRename(ov: *pal_abi.Overlapped, old_p: [*]const u8, o_len: usize, new_p: [*]const u8, n_len: usize) callconv(pal_abi.pal_cc) void {
-    var b1: [4096]u8 = undefined;
-    var b2: [4096]u8 = undefined;
-    const s1 = toCPath(old_p, o_len, &b1) orelse {
+    if (o_len == 0 or o_len >= 4096 or n_len == 0 or n_len >= 4096) {
         completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const s2 = toCPath(new_p, n_len, &b2) orelse {
-        completeInline(ov, pal_abi.ERROR_INVALID, 0, 0);
-        return;
-    };
-    const cwd: usize = @bitCast(@as(isize, sys.AT_FDCWD));
-    const res = sys.sys4(sys.NR.renameat, cwd, @intFromPtr(s1), cwd, @intFromPtr(s2));
-    if (sys.isErr(res)) |e| {
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
     }
-    completeInline(ov, 0, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .path_rename;
+    op.guest_ov = ov;
+    op.buf = @constCast(old_p);
+    op.len = o_len;
+    op.buf2 = new_p;
+    op.len2 = n_len;
+    submitOrRunInline(s, op);
 }
 
 fn parseIpv4(addr: []const u8) ?[4]u8 {
@@ -1009,15 +1356,28 @@ fn abiNetOpen(ov: *pal_abi.Overlapped, addr_ptr: [*]const u8, addr_len: usize, p
         return;
     }
 
-    const conn_res = sys.sys3(sys.NR.connect, @intCast(fd), @intFromPtr(&sa), @sizeOf(sys.SockAddrIn));
-    if (sys.isErr(conn_res)) |e| {
-        _ = sys.sys1(sys.NR.close, @intCast(fd));
-        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
-        return;
-    }
     const fl = sys.sys3(sys.NR.fcntl, @intCast(fd), 3, 0);
     if (sys.isErr(fl) == null) {
         _ = sys.sys3(sys.NR.fcntl, @intCast(fd), 4, fl | sys.O_NONBLOCK);
+    }
+    const conn_res = sys.sys3(sys.NR.connect, @intCast(fd), @intFromPtr(&sa), @sizeOf(sys.SockAddrIn));
+    if (sys.isErr(conn_res)) |e| {
+        if (e == 115) { // EINPROGRESS
+            const op = allocOp(s) orelse {
+                _ = sys.sys1(sys.NR.close, @intCast(fd));
+                completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+                return;
+            };
+            op.kind = .net_connect;
+            op.guest_ov = ov;
+            op.fd = fd;
+            op.arg_u32_a = port;
+            op.is_udp = is_udp;
+            return;
+        }
+        _ = sys.sys1(sys.NR.close, @intCast(fd));
+        completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
+        return;
     }
     const he = allocHandle(s) orelse {
         _ = sys.sys1(sys.NR.close, @intCast(fd));
@@ -1396,8 +1756,19 @@ fn verifyCertChainBytes(s: *PalState, name: []const u8, payload: []const u8) u32
 }
 
 fn abiNetCertVerify(ov: *pal_abi.Overlapped, name_ptr: [*]const u8, name_len: usize, chain_ptr: [*]const u8, chain_len: usize) callconv(pal_abi.pal_cc) void {
-    const rc = verifyCertChainBytes(statePtr(), name_ptr[0..name_len], chain_ptr[0..chain_len]);
-    completeInline(ov, rc, 0, 0);
+    const s = statePtr();
+    const op = allocOp(s) orelse {
+        completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
+        return;
+    };
+    op.kind = .worker_op;
+    op.work_kind = .net_cert_verify;
+    op.guest_ov = ov;
+    op.buf = @constCast(name_ptr);
+    op.len = name_len;
+    op.buf2 = chain_ptr;
+    op.len2 = chain_len;
+    submitOrRunInline(s, op);
 }
 
 fn nextNullStr(buf: []const u8, pos: *usize) ?[]const u8 {
@@ -1680,16 +2051,19 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
             return;
         };
         in_he.fd = in_fds[1];
+        setNonBlock(in_fds[1]);
         const out_he = allocHandle(s) orelse {
             completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
         };
         out_he.fd = out_fds[0];
+        setNonBlock(out_fds[0]);
         const err_he = allocHandle(s) orelse {
             completeInline(ov, pal_abi.ERROR_NOMEM, 0, 0);
             return;
         };
         err_he.fd = err_fds[0];
+        setNonBlock(err_fds[0]);
         pso.in_handle = in_he.token;
         pso.out_handle = out_he.token;
         pso.err_handle = err_he.token;
@@ -1701,10 +2075,17 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
     completeInline(ov, 0, 0, proc_he.token);
 }
 
+fn setNonBlock(fd: i32) void {
+    const fl = sys.sys3(sys.NR.fcntl, @intCast(fd), 3, 0);
+    if (sys.isErr(fl) == null) {
+        _ = sys.sys3(sys.NR.fcntl, @intCast(fd), 4, fl | sys.O_NONBLOCK);
+    }
+}
+
 fn abiProcessPipe(ov: *pal_abi.Overlapped) callconv(pal_abi.pal_cc) void {
     const s = statePtr();
     var fds: [2]i32 = .{ -1, -1 };
-    const res = sys.sys2(sys.NR.pipe2, @intFromPtr(&fds), 0o2000000); // O_CLOEXEC
+    const res = sys.sys2(sys.NR.pipe2, @intFromPtr(&fds), 0o2000000 | sys.O_NONBLOCK); // O_CLOEXEC | O_NONBLOCK
     if (sys.isErr(res)) |e| {
         completeInline(ov, sys.mapLinuxErrno(e), 0, 0);
         return;
@@ -1940,6 +2321,18 @@ pub fn unixPlatformMain() callconv(.c) i32 {
     s.* = .{};
     s.host = hostPtr().*;
 
+    const efd_res = sys.sys2(sys.NR.eventfd2, 0, sys.EFD_NONBLOCK | sys.EFD_CLOEXEC);
+    if (sys.isErr(efd_res) == null) {
+        s.event_fd = @intCast(efd_res);
+    }
+    const pool_bytes = pageAlign(@sizeOf(worker_pool.LinuxWorkerPool));
+    const pool_res = sys.sys6(sys.NR.mmap, 0, pool_bytes, sys.PROT_READ | sys.PROT_WRITE, sys.MAP_PRIVATE | sys.MAP_ANONYMOUS, @bitCast(@as(isize, -1)), 0);
+    if (sys.isErr(pool_res) == null) {
+        const pool: *worker_pool.LinuxWorkerPool = @ptrFromInt(pool_res);
+        pool.* = worker_pool.LinuxWorkerPool.init(s.event_fd, s, executeWorkItem);
+        s.pool_ptr = pool;
+    }
+
     const runtime_ptr = s.host.runtime_slice;
     const runtime_len = s.host.runtime_slice_size;
     if (runtime_len == 0 or s.host.wasm_bytes == null or s.host.wasm_len == 0) return 12;
@@ -2022,6 +2415,31 @@ pub fn unixPlatformMain() callconv(.c) i32 {
         var min_wait_ns: ?u64 = null;
         var fired = processSystemInfoTimers(s, now);
         var signal_pfd_idx: ?usize = null;
+        var event_pfd_idx: ?usize = null;
+
+        // Harvest any worker_op items already completed before sleeping.
+        for (&s.ops) |*op| {
+            if (op.used and op.kind == .worker_op and @atomicLoad(u32, &op.worker_done, .acquire) != 0) {
+                finishWorkerOp(s, op);
+                fired = true;
+            }
+        }
+
+        if (s.event_fd >= 0 and pfd_count < pfds.len) {
+            var has_worker = false;
+            for (&s.ops) |*op| {
+                if (op.used and op.kind == .worker_op) {
+                    has_worker = true;
+                    break;
+                }
+            }
+            if (has_worker) {
+                event_pfd_idx = pfd_count;
+                pfds[pfd_count] = .{ .fd = s.event_fd, .events = sys.POLLIN, .revents = 0 };
+                op_idx[pfd_count] = 0;
+                pfd_count += 1;
+            }
+        }
 
         if (s.signal_fd >= 0 and pfd_count < pfds.len) {
             var has_sig_waiter = false;
@@ -2071,6 +2489,10 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                 pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLIN, .revents = 0 };
                 op_idx[pfd_count] = idx;
                 pfd_count += 1;
+            } else if ((op.kind == .write_fd or op.kind == .net_connect) and pfd_count < pfds.len) {
+                pfds[pfd_count] = .{ .fd = op.fd, .events = sys.POLLOUT, .revents = 0 };
+                op_idx[pfd_count] = idx;
+                pfd_count += 1;
             } else if (op.kind == .wait_proc) {
                 var status: i32 = 0;
                 const wres = sys.sys4(sys.NR.wait4, @intCast(op.pid), @intFromPtr(&status), 1, 0);
@@ -2105,6 +2527,16 @@ pub fn unixPlatformMain() callconv(.c) i32 {
 
         for (0..pfd_count) |i| {
             if (pfds[i].revents != 0) {
+                if (event_pfd_idx != null and i == event_pfd_idx.?) {
+                    var cnt: u64 = 0;
+                    _ = sys.sys3(sys.NR.read, @intCast(s.event_fd), @intFromPtr(&cnt), @sizeOf(u64));
+                    for (&s.ops) |*wop| {
+                        if (wop.used and wop.kind == .worker_op and @atomicLoad(u32, &wop.worker_done, .acquire) != 0) {
+                            finishWorkerOp(s, wop);
+                        }
+                    }
+                    continue;
+                }
                 if (signal_pfd_idx != null and i == signal_pfd_idx.?) {
                     var si: sys.SignalfdSiginfo = .{};
                     while (true) {
@@ -2136,6 +2568,40 @@ pub fn unixPlatformMain() callconv(.c) i32 {
                             _ = sys.sys1(sys.NR.close, @intCast(cli_fd));
                             completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
                         }
+                    }
+                } else if (op.kind == .write_fd) {
+                    const res = if (op.is_udp)
+                        sys.sys6(sys.NR.sendto, @intCast(op.fd), @intFromPtr(op.buf.?), op.len, 0, 0, 0)
+                    else
+                        sys.sys3(sys.NR.write, @intCast(op.fd), @intFromPtr(op.buf.?), op.len);
+                    freeOp(s, op);
+                    if (sys.isErr(res)) |e| {
+                        completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    } else {
+                        completeInline(gov, 0, 0, res);
+                    }
+                } else if (op.kind == .net_connect) {
+                    var so_err: i32 = 0;
+                    var so_len: u32 = @sizeOf(i32);
+                    const sock_fd = op.fd;
+                    const port_val = op.arg_u32_a;
+                    const udp_val = op.is_udp;
+                    const gres = sys.sys6(sys.NR.getsockopt, @intCast(sock_fd), sys.SOL_SOCKET, sys.SO_ERROR, @intFromPtr(&so_err), @intFromPtr(&so_len), 0);
+                    freeOp(s, op);
+                    if (sys.isErr(gres)) |e| {
+                        _ = sys.sys1(sys.NR.close, @intCast(sock_fd));
+                        completeInline(gov, sys.mapLinuxErrno(e), 0, 0);
+                    } else if (so_err != 0) {
+                        _ = sys.sys1(sys.NR.close, @intCast(sock_fd));
+                        completeInline(gov, sys.mapLinuxErrno(@intCast(@abs(so_err))), 0, 0);
+                    } else if (allocHandle(s)) |nhe| {
+                        nhe.fd = sock_fd;
+                        nhe.is_socket = true;
+                        nhe.is_udp = udp_val;
+                        completeInline(gov, 0, port_val, nhe.token);
+                    } else {
+                        _ = sys.sys1(sys.NR.close, @intCast(sock_fd));
+                        completeInline(gov, pal_abi.ERROR_NOMEM, 0, 0);
                     }
                 } else if (op.kind == .dns_lookup) {
                     var resp: [512]u8 = undefined;

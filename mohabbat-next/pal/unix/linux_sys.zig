@@ -76,6 +76,80 @@ pub const SIG_BLOCK: usize = 0;
 pub const SFD_NONBLOCK: u32 = 0o4000;
 pub const SFD_CLOEXEC: u32 = 0o2000000;
 
+pub const EFD_NONBLOCK: u32 = 0o4000;
+pub const EFD_CLOEXEC: u32 = 0o2000000;
+
+pub const FUTEX_WAIT: usize = 0;
+pub const FUTEX_WAKE: usize = 1;
+pub const FUTEX_PRIVATE_FLAG: usize = 128;
+
+pub const SOL_SOCKET: usize = 1;
+pub const SO_ERROR: usize = 4;
+
+pub const CLONE_VM: usize = 0x00000100;
+pub const CLONE_FS: usize = 0x00000200;
+pub const CLONE_FILES: usize = 0x00000400;
+pub const CLONE_SIGHAND: usize = 0x00000800;
+pub const CLONE_THREAD: usize = 0x00010000;
+pub const CLONE_SYSVSEM: usize = 0x00040000;
+
+pub fn cloneThread(stack_top: usize, entry_fn: *const fn (usize) callconv(.c) void, arg: usize) isize {
+    const flags: usize = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    return switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\movq %[fn_ptr], -8(%[stk])
+            \\movq %[arg_val], -16(%[stk])
+            \\leaq -16(%[stk]), %%rsi
+            \\xorq %%rdx, %%rdx
+            \\xorq %%r10, %%r10
+            \\xorq %%r8, %%r8
+            \\movq $56, %%rax
+            \\syscall
+            \\testq %%rax, %%rax
+            \\jnz 1f
+            \\movq (%%rsp), %%rdi
+            \\movq 8(%%rsp), %%rax
+            \\addq $16, %%rsp
+            \\andq $-16, %%rsp
+            \\call *%%rax
+            \\xorq %%rdi, %%rdi
+            \\movq $60, %%rax
+            \\syscall
+            \\1:
+            : [ret] "={rax}" (-> isize),
+            : [rdi] "{rdi}" (flags),
+              [stk] "r" (stack_top),
+              [fn_ptr] "r" (@intFromPtr(entry_fn)),
+              [arg_val] "r" (arg),
+            : .{ .rcx = true, .rsi = true, .rdx = true, .r8 = true, .r10 = true, .r11 = true, .memory = true }
+        ),
+        .aarch64 => asm volatile (
+            \\stp %[fn_ptr], %[arg_val], [%[stk], #-16]!
+            \\mov x0, %[flags]
+            \\mov x1, %[stk]
+            \\mov x2, #0
+            \\mov x3, #0
+            \\mov x4, #0
+            \\mov x8, #220
+            \\svc #0
+            \\cbnz x0, 1f
+            \\ldp x1, x0, [sp], #16
+            \\blr x1
+            \\mov x0, #0
+            \\mov x8, #93
+            \\svc #0
+            \\1:
+            : [ret] "={x0}" (-> isize),
+            : [flags] "r" (flags),
+              [stk] "r" (stack_top),
+              [fn_ptr] "r" (@intFromPtr(entry_fn)),
+              [arg_val] "r" (arg),
+            : .{ .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x8 = true, .memory = true }
+        ),
+        else => @compileError("Unsupported arch"),
+    };
+}
+
 pub const SockAddrIn = extern struct {
     family: u16 = 2,
     port_be: u16 = 0,
@@ -299,6 +373,7 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const listen = 50;
         pub const getsockname = 51;
         pub const setsockopt = 54;
+        pub const getsockopt = 55;
         pub const clone = 56;
         pub const fork = 57;
         pub const execve = 59;
@@ -326,6 +401,8 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const ppoll = 271;
         pub const utimensat = 280;
         pub const signalfd4 = 289;
+        pub const eventfd2 = 290;
+        pub const futex = 202;
         pub const getrandom = 318;
     },
     .aarch64 => struct {
@@ -353,6 +430,8 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const pwrite64 = 66;
         pub const ppoll = 73;
         pub const signalfd4 = 74;
+        pub const eventfd2 = 19;
+        pub const futex = 98;
         pub const readlinkat = 78;
         pub const newfstatat = 79;
         pub const fstat = 80;
@@ -371,6 +450,7 @@ pub const NR = switch (builtin.cpu.arch) {
         pub const sendto = 206;
         pub const getsockname = 204;
         pub const setsockopt = 208;
+        pub const getsockopt = 209;
         pub const munmap = 215;
         pub const clone = 220;
         pub const execve = 221;
