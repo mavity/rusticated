@@ -658,3 +658,32 @@ func TestHost_ThrottledThemeQueryAndColorEventsThreadIntoRenderContext(t *testin
 		t.Fatalf("RenderContext.Theme.DefaultBackground = %#06x, want %#06x", got, want)
 	}
 }
+
+func TestHost_OSCCoalescingReaderPreventsSplitLeak(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	r, err := input.NewReader(newOSCCoalescingReader(pr), "", 0)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	go func() {
+		defer pw.Close()
+		_, _ = pw.Write([]byte("\x1b]11;rgb:3333/"))
+		time.Sleep(100 * time.Millisecond)
+		_, _ = pw.Write([]byte("3333/3333\x1b\\"))
+	}()
+
+	events, err := r.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ReadEvents returned %d events (%#v), want 1 BackgroundColorEvent", len(events), events)
+	}
+	if _, ok := events[0].(input.BackgroundColorEvent); !ok {
+		t.Fatalf("event[0] = %T, want input.BackgroundColorEvent", events[0])
+	}
+}

@@ -255,7 +255,7 @@ func (h *Host) runCore(
 	// Initial render
 	h.Invalidate()
 
-	r, err := input.NewReader(in, "", 0)
+	r, err := input.NewReader(newOSCCoalescingReader(in), "", 0)
 	if err == nil {
 		inputReader = r
 		if h.verbose {
@@ -800,6 +800,9 @@ func (h *Host) appendThrottledThemeQuery(sb *strings.Builder) {
 	if !h.queryThemeColors {
 		return
 	}
+	if h.theme.HasDefaultFG && h.theme.HasDefaultBG {
+		return
+	}
 	now := time.Now()
 	if !h.lastThemeQuery.IsZero() && now.Sub(h.lastThemeQuery) < themeQueryInterval {
 		return
@@ -953,11 +956,82 @@ func (h *Host) runScrollbackFrame(
 
 // ── Input loop ────────────────────────────────────────────────────────────────
 
+// oscCoalescingReader ensures an OSC escape sequence (\x1b]... terminated by
+// \x07 or \x1b\\) split across slow PTY reads (such as ConPTY -> WSL) is
+// delivered complete to x/input.Reader so its 50ms escTimeout does not flush
+// partial RGB payloads like "33/3333" as literal keystrokes.
+type oscCoalescingReader struct {
+	r   io.Reader
+	buf []byte
+}
+
+func newOSCCoalescingReader(r io.Reader) io.Reader {
+	if _, ok := r.(*oscCoalescingReader); ok {
+		return r
+	}
+	return &oscCoalescingReader{r: r}
+}
+
+func hasIncompleteOSC(b []byte) bool {
+	lastEsc := -1
+	for i := 0; i+1 < len(b); i++ {
+		if b[i] == 0x1b && b[i+1] == ']' {
+			lastEsc = i
+		}
+	}
+	if lastEsc < 0 {
+		return false
+	}
+	tail := b[lastEsc+2:]
+	for i := 0; i < len(tail); i++ {
+		if tail[i] == 0x07 {
+			return false
+		}
+		if tail[i] == 0x1b && i+1 < len(tail) && tail[i+1] == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *oscCoalescingReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(c.buf) > 0 {
+		n := copy(p, c.buf)
+		c.buf = c.buf[n:]
+		return n, nil
+	}
+	n, err := c.r.Read(p)
+	if n <= 0 || err != nil || !hasIncompleteOSC(p[:n]) {
+		return n, err
+	}
+	var tmp [256]byte
+	const maxOSC = 512
+	acc := append([]byte(nil), p[:n]...)
+	for hasIncompleteOSC(acc) && len(acc) < maxOSC {
+		m, rerr := c.r.Read(tmp[:])
+		if m > 0 {
+			acc = append(acc, tmp[:m]...)
+		}
+		if rerr != nil {
+			err = rerr
+			break
+		}
+	}
+	copied := copy(p, acc)
+	if copied < len(acc) {
+		c.buf = append(c.buf[:0], acc[copied:]...)
+	}
+	return copied, err
+}
+
 func (h *Host) readInputLoop(in io.Reader) {
 	// Use x/input.Reader for robust, protocol-complete event handling.
 	// Production passes os.Stdin; tests use an io.Pipe so the terminal boundary
 	// stays real without injecting fake global terminal state.
-	r, err := input.NewReader(in, "", 0)
+	r, err := input.NewReader(newOSCCoalescingReader(in), "", 0)
 	if err != nil {
 		return
 	}
